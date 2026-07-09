@@ -15,6 +15,7 @@ import { resolveName } from './names.js';
 import { upsertHeard, sameNode, addNodeKey } from './recent.js';
 import { updateMotion, captureDecision } from './motion.js';
 import { createWakeLock } from './wakelock.js';
+import { createBeeper } from './beeper.js';
 import { createLocalMap } from './localmap.js';
 import { hexCellAt } from './hexgrid.js';
 import {
@@ -31,6 +32,7 @@ const state = {
   transport: null, gps: new Gps(), queue: new Queue(), publisher: null,
   companionPubkey: '', companionName: '', connected: false, recent: [],
   localMap: null, verbose: false, motion: null, paused: false, wakeLock: null,
+  soundEnabled: false, beeper: null,
   // monitor counters / state
   rxTotal: 0, nodeKeys: [], hexCells: new Set(), rxTimes: [],
   lastUploadAt: null, brokerState: 'offline',
@@ -319,6 +321,7 @@ async function processFrame(dv) {
   renderCounters();
   const rec = { rx_at: new Date().toISOString(), raw: rawHex, snr: f.snr, rssi: f.rssi, lat: fix.lat, lon: fix.lon, acc_m: fix.acc_m };
   await state.queue.add(rec);
+  if (state.soundEnabled && state.beeper) state.beeper.beep(); // audio cue per mapped node (#7)
   if (state.localMap) state.localMap.addPoint(fix.lat, fix.lon, f.snr); // live hex on the map
   refreshCounters();
 }
@@ -492,15 +495,25 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
   setButton();
   state.wakeLock = createWakeLock();
+  // Audio cue (#7): default off, but remember the choice across app starts.
+  state.beeper = createBeeper();
+  state.soundEnabled = localStorage.getItem('coredrive.sound') === '1';
+  els('chkSound').checked = state.soundEnabled;
   // Web Bluetooth missing (e.g. iOS Safari) — point the user to a supported browser.
   if (!navigator.bluetooth) els('btnotice').style.display = 'block';
   els('btnConnect').addEventListener('click', () => {
     if (state.connected) { disconnectAll(); return; }
     state.wakeLock.enable(); // acquire in the user gesture (iOS needs it for video.play())
+    if (state.soundEnabled) state.beeper.ensure(); // unlock audio in the same gesture
     connectAll();
   });
   els('btnClear').addEventListener('click', () => { els('log').textContent = ''; });
   els('chkVerbose').addEventListener('change', (e) => { state.verbose = e.target.checked; });
+  els('chkSound').addEventListener('change', (e) => {
+    state.soundEnabled = e.target.checked;
+    localStorage.setItem('coredrive.sound', state.soundEnabled ? '1' : '0');
+    if (state.soundEnabled) state.beeper.ensure(); // unlock + confirm audio in this gesture
+  });
   els('btnPush').addEventListener('click', pushNow);
   els('btnShareLog').addEventListener('click', async () => {
     const text = Array.from(els('log').childNodes).map((n) => n.textContent).join('\n');
