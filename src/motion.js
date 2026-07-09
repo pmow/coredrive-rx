@@ -26,6 +26,17 @@ export function initMotion(fix, now) {
   return { anchor: { lat: fix.lat, lon: fix.lon }, anchorTime: now, paused: false };
 }
 
+// captureDecision(state, fix, now, opts): for a HEARD packet at `fix`, advance the
+// idle gate and decide whether to capture. Wake-on-packet: a packet is also a chance
+// to notice we've started moving again when the GPS callback cadence stalled (the PWA
+// is throttled while backgrounded / the screen is off), so capture resumes on the
+// first packet from a moved position instead of waiting for a GPS fix that may not
+// come until the user foregrounds the app. Returns { motion, capture }.
+export function captureDecision(state, fix, now, opts = {}) {
+  const motion = updateMotion(state, fix, now, opts);
+  return { motion, capture: !motion.paused };
+}
+
 // updateMotion(state, fix, now, opts): advance the gate with a new fix. Returns a
 // NEW state. Moving (> radiusM from the anchor) re-anchors and unpauses; staying
 // within the radius past dwellMs pauses (anchor + anchorTime unchanged, so the

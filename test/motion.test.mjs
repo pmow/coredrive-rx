@@ -2,7 +2,7 @@
 // capture/upload pauses when parked and resumes on movement. Run: node --test
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { updateMotion, distanceM, DEFAULT_RADIUS_M, DEFAULT_DWELL_MS } from '../src/motion.js';
+import { updateMotion, captureDecision, distanceM, DEFAULT_RADIUS_M, DEFAULT_DWELL_MS } from '../src/motion.js';
 
 const MIN = 60 * 1000;
 
@@ -51,6 +51,36 @@ test('within-radius jitter does not reset the dwell timer', () => {
   assert.strictEqual(s.anchorTime, 0);                       // anchor time held from arrival
   s = updateMotion(s, { lat: 50.8500, lon: 4.5000 }, 16 * MIN);
   assert.strictEqual(s.paused, true);                        // paused at arrival+16min, jitter didn't reset it
+});
+
+// --- captureDecision: wake-on-packet gate --------------------------------------
+// A heard packet advances the idle gate too, so movement resumes capture even when
+// the GPS callback cadence stalled (backgrounded PWA). Returns { motion, capture }.
+
+test('heard packet while paused, with a moved fix, resumes and captures', () => {
+  let s = updateMotion(null, { lat: 50.85, lon: 4.5 }, 0);
+  s = updateMotion(s, { lat: 50.85, lon: 4.5 }, 16 * MIN);
+  assert.strictEqual(s.paused, true);                        // parked → paused
+  const d = captureDecision(s, { lat: 50.86, lon: 4.5 }, 17 * MIN); // packet from ~1.1 km away
+  assert.strictEqual(d.capture, true);
+  assert.strictEqual(d.motion.paused, false);
+  assert.strictEqual(d.motion.anchor.lat, 50.86);            // re-anchored to where we now are
+});
+
+test('heard packet while paused, with a stale parked fix, stays paused and does not capture', () => {
+  let s = updateMotion(null, { lat: 50.85, lon: 4.5 }, 0);
+  s = updateMotion(s, { lat: 50.85, lon: 4.5 }, 16 * MIN);
+  assert.strictEqual(s.paused, true);
+  const d = captureDecision(s, { lat: 50.8501, lon: 4.5 }, 17 * MIN); // ~11 m jitter, still parked
+  assert.strictEqual(d.capture, false);
+  assert.strictEqual(d.motion.paused, true);
+});
+
+test('heard packet while active captures', () => {
+  const s = updateMotion(null, { lat: 50.85, lon: 4.5 }, 0); // active
+  const d = captureDecision(s, { lat: 50.8502, lon: 4.5 }, 1 * MIN);
+  assert.strictEqual(d.capture, true);
+  assert.strictEqual(d.motion.paused, false);
 });
 
 test('default thresholds are 75 m / 5 min', () => {
