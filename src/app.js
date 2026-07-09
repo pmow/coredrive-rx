@@ -13,7 +13,7 @@ import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute } from './meshpac
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
 import { resolveName } from './names.js';
 import { upsertHeard, sameNode, addNodeKey } from './recent.js';
-import { updateMotion } from './motion.js';
+import { updateMotion, captureDecision } from './motion.js';
 import { createWakeLock } from './wakelock.js';
 import { createLocalMap } from './localmap.js';
 import { hexCellAt } from './hexgrid.js';
@@ -306,7 +306,14 @@ async function processFrame(dv) {
 
   const fix = currentFix();
   if (!fix) { dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig + ' — no GPS, not queued', 'no'); return; }
-  if (state.paused) { dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig + ' — stationary, not queued', 'no'); return; }
+  // Wake-on-packet (issue #9): a heard packet advances the idle gate too, so movement
+  // resumes capture even when the GPS callback cadence stalled while backgrounded /
+  // screen-off. A packet from a moved position unpauses; one still at the parked
+  // anchor stays paused.
+  const dec = captureDecision(state.motion, fix, Date.now());
+  state.motion = dec.motion;
+  setPaused(state.motion.paused);
+  if (!dec.capture) { dbg('heard ' + hk.heardKey + ' (' + hk.src + ')' + sig + ' — stationary, not queued', 'no'); return; }
   dbg('heard ' + hk.heardKey + ' (' + hk.heardKeyLen + 'B, ' + hk.src + ')' + sig, 'ok');
   state.hexCells.add(hexCellAt(fix.lat, fix.lon, HEX_COUNT_RES));
   renderCounters();
