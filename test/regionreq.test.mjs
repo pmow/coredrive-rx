@@ -147,7 +147,7 @@ test('no candidates yields null rather than throwing', () => {
 test('parseSentAck reads the tag from a RESP_CODE_SENT ack', () => {
   // [0x06][is_flood: 1][tag: 4][est_timeout: 4]
   const bytes = new Uint8Array([RESP_CODE_SENT, 0, ...le32(0x11223344), ...le32(9000)]);
-  assert.deepEqual(parseSentAck(bytes), { tag: 0x11223344 });
+  assert.deepEqual(parseSentAck(bytes), { tag: 0x11223344, isFlood: false });
 });
 
 test('parseSentAck rejects a wrong code and a too-short frame', () => {
@@ -193,4 +193,13 @@ test('a reply is ignored when no tag has been captured yet (RESP_CODE_SENT ack n
 
 test('a reply is ignored when there is no pending request at all', () => {
   assert.deepEqual(applyRegionsReply(null, reply(1, [])), { accepted: false });
+});
+
+test('parseSentAck reports the route the companion actually used', () => {
+  // [0x06][is_flood][tag 4][est_timeout 4] — companion_radio/MyMesh.cpp:1568-1572
+  const direct = new Uint8Array([RESP_CODE_SENT, 0, ...le32(0xaabbccdd), 0, 0, 0, 0]);
+  const flood = new Uint8Array([RESP_CODE_SENT, 1, ...le32(0xaabbccdd), 0, 0, 0, 0]);
+  assert.equal(parseSentAck(direct).isFlood, false, 'a direct send can be answered');
+  assert.equal(parseSentAck(flood).isFlood, true, 'a flooded send will be silently ignored by the repeater');
+  assert.equal(parseSentAck(flood).tag, 0xaabbccdd, 'the tag is still read on the flood path');
 });

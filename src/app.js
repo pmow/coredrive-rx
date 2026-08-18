@@ -220,9 +220,17 @@ function askRegions(target, frame) {
     const ack = parseSentAck(bytes);
     if (!ack) return;
     cleanup();
-    if (state.regions.pending && state.regions.pending.target === target) {
-      state.regions.pending.tag = ack.tag;
+    if (!(state.regions.pending && state.regions.pending.target === target)) return;
+    if (ack.isFlood) {
+      // Flooded: the repeater requires a DIRECT route and drops this silently.
+      // Clear the pending slot rather than waiting out a reply that cannot come,
+      // and say so — otherwise this looks identical to a repeater in range that
+      // simply has not answered yet.
+      state.regions.pending = null;
+      dbg('regions: ' + target.slice(0, 12) + '… asked over FLOOD — repeaters only answer DIRECT, no reply will come', 'no');
+      return;
     }
+    state.regions.pending.tag = ack.tag;
   };
   const timer = setTimeout(() => {
     cleanup();

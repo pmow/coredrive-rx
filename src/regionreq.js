@@ -75,7 +75,15 @@ export function parseRegionsResponse(bytes) {
 export function parseSentAck(bytes) {
   if (!bytes || bytes.length < 6 || bytes[0] !== RESP_CODE_SENT) return null;
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return { tag: v.getUint32(2, true) };
+  // isFlood is decisive, not informational: the repeater answers a regions request
+  // ONLY over a direct route (simple_repeater/MyMesh.cpp requires isRouteDirect())
+  // and ignores a flooded one without any error. The companion picks the route for
+  // us — sendAnonReq floods whenever the target is a known contact whose
+  // out_path_len is OUT_PATH_UNKNOWN — and reports which it chose here
+  // (companion_radio/MyMesh.cpp:1569: out_frame[1] = SENT_FLOOD ? 1 : 0). Without
+  // reading it, a request that can never be answered is indistinguishable from one
+  // still in flight.
+  return { tag: v.getUint32(2, true), isFlood: bytes[1] === 1 };
 }
 
 // applyRegionsReply decides whether a parsed PUSH_CODE_BINARY_RESPONSE answers the
