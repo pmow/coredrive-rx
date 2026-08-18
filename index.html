@@ -68,6 +68,7 @@
       <div><span id="cNodes">0</span><small>nodes</small></div>
       <div><span id="cHex">0</span><small>hex cells</small></div>
       <div><span id="cRx">0</span><small>receptions</small></div>
+      <div id="cRfLogRow" style="display:none"><span id="cRfLog">0</span><small>RF log</small></div>
     </div>
     <div class="statusstrip">
       <span id="sGps">… no fix</span><span>·</span>
@@ -115,6 +116,7 @@
     </div>
     <div class="card">
       <label>Diagnostics</label>
+      <div class="muted" id="fullRfLogInfo" style="display:none">Full RF logging: on</div>
       <label class="inline"><input type="checkbox" id="chkVerbose"> Verbose (raw packet bytes + unattributable frames)</label>
       <div class="row" style="margin-top:10px">
         <button id="btnDbg" class="btn2">Show debug log</button>

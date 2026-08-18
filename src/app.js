@@ -26,6 +26,7 @@ import { Gps } from './gps.js';
 import { Queue } from './queue.js';
 import { Publisher } from './publisher.js';
 import { loadConfig, getConfig } from './config.js';
+import { buildRfLogRecord } from './capture.js';
 
 const els = (id) => document.getElementById(id);
 const state = {
@@ -34,7 +35,7 @@ const state = {
   localMap: null, verbose: false, motion: null, paused: false, wakeLock: null,
   soundEnabled: false, beeper: null,
   // monitor counters / state
-  rxTotal: 0, nodeKeys: [], hexCells: new Set(), rxTimes: [],
+  rxTotal: 0, rfLogged: 0, nodeKeys: [], hexCells: new Set(), rxTimes: [],
   lastUploadAt: null, brokerState: 'offline',
   lastHeard: null, snrBarPct: 0, snrPeakPct: 0,
   // auto-discover
@@ -189,6 +190,10 @@ function renderCounters() {
   els('cNodes').textContent = String(state.nodeKeys.length);
   els('cHex').textContent = String(state.hexCells.size);
   els('cRx').textContent = String(state.rxTotal);
+  const cfg = getConfig();
+  const fullRfLog = !!(cfg && cfg.fullRfLog);
+  els('cRfLogRow').style.display = fullRfLog ? '' : 'none';
+  if (fullRfLog) els('cRfLog').textContent = String(state.rfLogged);
 }
 
 function agoText(at, now) {
@@ -287,9 +292,31 @@ async function processFrame(dv) {
     // transmitter removed itself from the path's front), and 1-byte hops are collision-prone —
     // both are called out. Everything else (tx / no advert) is pure noise, verbose only.
     const lastHop = pkt && pkt.hops.length ? pkt.hops[pkt.hops.length - 1] : null;
-    if (lastHop && pkt.hops.length && !isFloodRoute(pkt.routeType)) dbg('direct route — transmitter not in path, skipped', 'st');
-    else if (lastHop && lastHop.length === 2) dbg('1-byte path-hash (' + lastHop + ') — seen, ignored', 'st');
-    else if (state.verbose) dbg('not attributable (tx / no advert) — skip' + sig, 'no');
+    const logged = getConfig() && getConfig().fullRfLog;
+    const suffix = logged ? ', logged' : ', skipped';
+    if (lastHop && pkt.hops.length && !isFloodRoute(pkt.routeType)) dbg('direct route — transmitter not in path' + suffix, 'st');
+    else if (lastHop && lastHop.length === 2) dbg('1-byte path-hash (' + lastHop + ') — seen' + suffix, 'st');
+    else if (state.verbose) dbg('not attributable (tx / no advert)' + suffix + sig, 'no');
+
+    // fullRfLog: the packet is not coverage and must move NO coverage state —
+    // no counters, no SNR meter, no hex, no beep. It is queued and nothing else.
+    if (!logged) return;
+    const rfFix = currentFix();
+    let rfCapture = false;
+    if (rfFix) {
+      const rfDec = captureDecision(state.motion, rfFix, Date.now());
+      state.motion = rfDec.motion;
+      setPaused(state.motion.paused);
+      rfCapture = rfDec.capture;
+    }
+    const rfRec = buildRfLogRecord({
+      hk, fullRfLog: true, rawHex, snr: f.snr, rssi: f.rssi,
+      fix: rfFix, captureAllowed: rfCapture, nowISO: new Date().toISOString(),
+    });
+    if (!rfRec) return;
+    state.rfLogged++;
+    await state.queue.add(rfRec);
+    renderCounters();
     return;
   }
 
@@ -490,6 +517,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   els('appver').textContent = 'v' + VERSION;
   try {
     await loadConfig();
+    els('fullRfLogInfo').style.display = getConfig().fullRfLog ? '' : 'none';
   } catch (e) {
     log('Config error: ' + e.message + ' — copy config.example.json to config.json and fill it in.');
   }

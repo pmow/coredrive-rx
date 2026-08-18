@@ -33,3 +33,12 @@ test('normalizeConfig defaults mqttPassword to empty string when absent', () => 
   const c = normalizeConfig({ mqttUrl: 'wss://b/ws' });
   assert.strictEqual(c.mqttPassword, '');
 });
+
+test('fullRfLog defaults to false and accepts true', () => {
+  const base = { mqttUrl: 'wss://b.example/ws' };
+  assert.equal(normalizeConfig(base).fullRfLog, false);
+  assert.equal(normalizeConfig({ ...base, fullRfLog: true }).fullRfLog, true);
+  // Anything non-boolean is coerced, never left undefined.
+  assert.equal(normalizeConfig({ ...base, fullRfLog: 'yes' }).fullRfLog, true);
+  assert.equal(normalizeConfig({ ...base, fullRfLog: 0 }).fullRfLog, false);
+});

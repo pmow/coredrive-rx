@@ -13,6 +13,7 @@ export function normalizeConfig(raw) {
     mqttUsername: String(raw.mqttUsername || '').trim(),
     mqttPassword: raw.mqttPassword == null ? '' : String(raw.mqttPassword),
     resolveUrl: String(raw.resolveUrl || '').trim(),
+    fullRfLog: !!raw.fullRfLog,
   };
   if (!c.mqttUrl) throw new Error('config.json: "mqttUrl" is required');
   return c;
