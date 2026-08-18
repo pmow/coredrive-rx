@@ -19,7 +19,7 @@
     button:disabled { opacity: .6; }
     .btn2 { background: #3b82f6; color: #fff; }
     .btn2.on { background: #2ecc71; color: #07120a; }
-    .stats { display: flex; gap: 16px; font-size: 28px; font-weight: 700; }
+    .stats { display: flex; gap: 16px; font-size: 24px; font-weight: 700; }
     .stats div { flex: 1; text-align: center; }
     .stats small { display: block; font-size: 11px; color: #9aa4b2; font-weight: 400; }
     .muted { font-size: 12px; color: #9aa4b2; margin-top: 6px; }
@@ -36,9 +36,9 @@
     #log .lg-no { color: #ff8b7a; } /* held back / failed */
     #log .lg-st { color: #9aa4b2; } /* status */
     #log .lg-tx { color: #e6a23c; } /* our own outbound radio sends (discover / flood) */
-    .statusstrip { font-size: 12px; color: #9aa4b2; margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .statusstrip { font-size: 12px; color: #9aa4b2; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
     .statusstrip .udot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #9aa4b2; margin-right: 3px; }
-    .discstatus { font-size: 12px; margin-top: 6px; min-height: 15px; color: #9aa4b2; }
+    .discstatus { font-size: 12px; margin-top: 4px; min-height: 13px; color: #9aa4b2; }
     .lh { font-size: 13px; }
     .meter { position: relative; height: 18px; background: #0a0c10; border: 1px solid #2a2f3a; border-radius: 5px; overflow: hidden; margin-top: 6px; }
     .meterfill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #2ecc71; transition: width .2s linear; }
@@ -51,6 +51,12 @@
     .rr .rname { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .rr .rsnr { margin-left: auto; font-weight: 600; flex: 0 0 auto; }
     .rr .rc { color: #9aa4b2; font-size: 11px; min-width: 34px; text-align: right; }
+    .rg { display: flex; flex-direction: column; gap: 4px; }
+    .rgrow { padding: 7px 9px; background: #11141a; border: 1px solid #2a2f3a; border-radius: 6px; font-size: 13px; }
+    .rgrow .rgname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rgrow .rgregions { font-size: 12px; color: #e6e6e6; margin-top: 2px; }
+    .rgrow .rgregions.none { color: #e6a23c; }
+    .rgrow .rgwarn { font-size: 11px; color: #ff8b7a; margin-top: 2px; }
     body { padding-bottom: 70px; }
     .bottombar { position: fixed; bottom: 0; left: 0; right: 0; height: 56px; display: flex; background: #1a1d24; border-top: 1px solid #2a2f3a; z-index: 1000; }
     .bottombar .tab { flex: 1; background: transparent; color: #9aa4b2; border: 0; border-radius: 0; margin: 0; font-size: 14px; font-weight: 600; }
@@ -88,6 +94,10 @@
   <div class="card">
     <label>Recently heard nodes (latest SNR)</label>
     <div id="recent" class="recent"><div class="muted">— nothing yet —</div></div>
+  </div>
+  <div class="card" id="regionsCard" style="display:none">
+    <label>Last 5 declared scopes (region discovery)</label>
+    <div id="regionsList" class="rg"></div>
   </div>
   </div><!-- /view-home -->
   <div id="view-map" style="display:none">

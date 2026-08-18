@@ -29,6 +29,7 @@ import { loadConfig, getConfig } from './config.js';
 import { buildRfLogRecord } from './capture.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
 import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply } from './regionreq.js';
+import { regionsRows } from './regionsview.js';
 
 // Region discovery needs FIRMWARE_VER_CODE >= 13 (companion_radio/MyMesh.cpp,
 // CMD_SEND_ANON_REQ's non-contact allowance) to address a repeater it hasn't
@@ -57,10 +58,16 @@ const state = {
   regions: {
     candidates: new Map(), answered: new Map(), demoted: new Set(), cursor: 0,
     round: 0, pending: null, supported: false,
+    // answers: accepted replies, oldest first, for the Home "declared scopes" panel
+    // (src/regionsview.js does the last-5/most-recent-first transform). Each entry
+    // is { target, regions, truncated, at, name }; name is filled in lazily once
+    // resolveName returns (see noteRegionsAnswer).
+    answers: [],
   },
 };
 
 const RECENT_MAX = 20;
+const REGIONS_ANSWERS_MAX = 200; // display only shows the last 5 (regionsview.js); this just bounds session memory
 const HEX_COUNT_RES = 10; // fixed res (~90 m cells) for the distinct-hex session counter
 // Build version, injected from package.json by Vite (see vite.config.js).
 const VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
@@ -255,6 +262,7 @@ function onRegionsFrame(dv) {
   state.regions.pending = null;
   state.regions.demoted.delete(result.target); // it answered — no longer a non-answerer
   state.regions.answered.set(result.target, result.advertTs);
+  noteRegionsAnswer(result.target, result.regions, result.truncated);
   const fix = currentFix();
   state.queue.add({
     kind: 'regions', at: new Date().toISOString(), target: result.target,
@@ -341,6 +349,35 @@ function renderLastHeard() {
   // returns (the per-second tick re-renders this).
   const { key, at } = state.lastHeard;
   els('lhLine').textContent = nodeLabel(key) + ' — ' + agoText(at, Date.now());
+}
+
+// renderRegionsCard shows the last 5 repeaters that answered a region-discovery
+// request, most recent first. Hidden entirely until there is at least one answer.
+// declaresNothing is a real answer (the repeater flood-allows nothing), rendered
+// distinctly from a non-empty list — never left blank as if unknown.
+function renderRegionsCard() {
+  const rows = regionsRows(state.regions.answers);
+  if (!rows.length) { els('regionsCard').style.display = 'none'; return; }
+  els('regionsCard').style.display = 'block';
+  els('regionsList').innerHTML = rows.map((r) => {
+    const label = r.name ? esc(r.name) : '<span class="rk">' + r.target.slice(0, 12) + '…</span>';
+    const regionsCls = r.declaresNothing ? 'rgregions none' : 'rgregions';
+    const regionsText = r.declaresNothing ? 'declares nothing flood-allowed' : esc(r.regions.join(', '));
+    const warn = r.truncated ? '<div class="rgwarn">⚠ truncated — some regions may be missing</div>' : '';
+    return '<div class="rgrow"><div class="rgname">' + label + '</div>' +
+      '<div class="' + regionsCls + '">' + regionsText + '</div>' + warn + '</div>';
+  }).join('');
+}
+
+// noteRegionsAnswer records an accepted region-discovery reply for the Home panel
+// (renderRegionsCard). Name resolution reuses names.js's session cache — one lookup
+// per newly-seen target, not a network call on every render.
+function noteRegionsAnswer(target, regions, truncated) {
+  const rec = { target, regions, truncated, at: Date.now(), name: undefined };
+  state.regions.answers.push(rec);
+  if (state.regions.answers.length > REGIONS_ANSWERS_MAX) state.regions.answers.shift();
+  resolveName(target).then((nm) => { rec.name = nm || ''; renderRegionsCard(); });
+  renderRegionsCard();
 }
 
 function renderSnrMeter() {
