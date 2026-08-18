@@ -7,6 +7,7 @@
 export const CMD_SEND_ANON_REQ = 57;
 export const PUSH_CODE_BINARY_RESPONSE = 0x8c;
 export const ANON_REQ_TYPE_REGIONS = 0x01;
+export const RESP_CODE_SENT = 6; // companion_radio/MyMesh.cpp:77 — shared by every CMD_SEND_* path
 
 // The repeater's CSV budget is sizeof(reply_data) - 12 = 172 bytes. exportNamesTo
 // SKIPS names that do not fit and keeps going, so an overflowing list has holes
@@ -50,5 +51,39 @@ export function parseRegionsResponse(bytes) {
     repeaterClock: v.getUint32(6, true),
     regions: csv.length ? csv.split(',') : [],
     truncated: csv.length >= TRUNCATION_WARN_BYTES,
+  };
+}
+
+// parseSentAck reads the tag from the immediate ack for CMD_SEND_ANON_REQ:
+// [0x06][is_flood: 1][tag: 4][est_timeout: 4] (companion_radio/MyMesh.cpp:1568-1572).
+// RESP_CODE_SENT is shared by every CMD_SEND_* path in the firmware (text message,
+// login, anon req, ...) — the caller must only feed this the ack that followed its
+// own send, not just any RESP_CODE_SENT frame that happens to arrive.
+export function parseSentAck(bytes) {
+  if (!bytes || bytes.length < 6 || bytes[0] !== RESP_CODE_SENT) return null;
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { tag: v.getUint32(2, true) };
+}
+
+// applyRegionsReply decides whether a parsed PUSH_CODE_BINARY_RESPONSE answers the
+// currently pending request. `pending` is { target, advertTs, tag } (tag captured
+// from parseSentAck) or null. The repeater rate-limits and replies after a delay,
+// and a DIFFERENT repeater is asked every round, so a reply delayed past one round
+// can arrive while another target is pending — matching on "something is pending"
+// rather than on the echoed tag would attribute one repeater's declared regions to
+// a different repeater and store it as fact. On any mismatch (including a tag not
+// yet captured) this returns accepted:false and the caller MUST NOT clear pending —
+// the real reply may still be on its way.
+export function applyRegionsReply(pending, parsed) {
+  if (!pending || !parsed || pending.tag == null || parsed.tag !== pending.tag) {
+    return { accepted: false };
+  }
+  return {
+    accepted: true,
+    target: pending.target,
+    advertTs: pending.advertTs,
+    regions: parsed.regions,
+    truncated: parsed.truncated,
+    repeaterClock: parsed.repeaterClock,
   };
 }

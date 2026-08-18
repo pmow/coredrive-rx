@@ -28,7 +28,7 @@ import { Publisher } from './publisher.js';
 import { loadConfig, getConfig } from './config.js';
 import { buildRfLogRecord } from './capture.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
-import { buildRegionsRequest, parseRegionsResponse, selectNextTarget } from './regionreq.js';
+import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply } from './regionreq.js';
 
 // Region discovery needs FIRMWARE_VER_CODE >= 13 (companion_radio/MyMesh.cpp,
 // CMD_SEND_ANON_REQ's non-contact allowance) to address a repeater it hasn't
@@ -172,6 +172,8 @@ function fireDiscover(now) {
 // never a fan-out over candidates. selectNextTarget (src/regionreq.js) is the pure
 // round-robin/demotion decision; this is wiring: call it, and if (and only if) it
 // names a target, send exactly one buildRegionsRequest.
+const REGION_SENT_ACK_TIMEOUT_MS = 4000;
+
 function maybeQueryRegions() {
   if (!state.transport) return;
   const r = state.regions;
@@ -185,8 +187,38 @@ function maybeQueryRegions() {
   const advertTs = r.candidates.get(target);
   r.cursor++;
   r.demoted.add(target); // demoted until it answers — silence must never look like "declared nothing"
-  r.pending = { target, advertTs };
-  state.transport.send(buildRegionsRequest(target)).catch((e) => dbg('regions request failed: ' + e.message, 'no'));
+  // tag starts null: the reply-matcher (applyRegionsReply) treats a null tag as
+  // "not yet confirmed" and refuses to accept ANY reply until the RESP_CODE_SENT
+  // ack (captured below) fills it in — a reply must never be attributed on the
+  // sole evidence that a request happens to be pending.
+  r.pending = { target, advertTs, tag: null };
+  askRegions(target);
+}
+
+// askRegions sends the request and listens for the immediate RESP_CODE_SENT ack to
+// capture the tag the eventual PUSH_CODE_BINARY_RESPONSE must match — the repeater
+// rate-limits and replies after a delay, and a DIFFERENT repeater is asked every
+// round, so a reply delayed past one round can land while another target is
+// pending. Matching on "something is pending" instead of on this tag would
+// attribute one repeater's declared regions to a different repeater and store it
+// as fact (see applyRegionsReply in src/regionreq.js for the actual decision).
+function askRegions(target) {
+  const onAck = (dv) => {
+    const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+    const ack = parseSentAck(bytes);
+    if (!ack) return;
+    cleanup();
+    if (state.regions.pending && state.regions.pending.target === target) {
+      state.regions.pending.tag = ack.tag;
+    }
+  };
+  const timer = setTimeout(() => {
+    cleanup();
+    dbg('regions: no send-ack for ' + target.slice(0, 12) + '… (tag never captured)', 'no');
+  }, REGION_SENT_ACK_TIMEOUT_MS);
+  function cleanup() { clearTimeout(timer); state.transport.offFrame(onAck); }
+  state.transport.onFrame(onAck);
+  state.transport.send(buildRegionsRequest(target)).catch((e) => { cleanup(); dbg('regions request failed: ' + e.message, 'no'); });
   dbg('regions → asked ' + target.slice(0, 12) + '… for its declared list', 'tx');
 }
 
@@ -196,19 +228,26 @@ function maybeQueryRegions() {
 // silently misfire this check and discard every reply with no error anywhere).
 function onRegionsFrame(dv) {
   const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-  const r = parseRegionsResponse(bytes);
-  if (!r || !state.regions.pending) return;
-  const { target, advertTs } = state.regions.pending;
+  const parsed = parseRegionsResponse(bytes);
+  if (!parsed) return;
+  const result = applyRegionsReply(state.regions.pending, parsed);
+  if (!result.accepted) {
+    // Tag mismatch (or none captured yet) — a stray/late reply from an abandoned
+    // round. Do NOT clear pending: the real reply for the current target may still
+    // be on its way.
+    if (state.regions.pending) dbg('regions ← reply tag mismatch (got ' + parsed.tag + ') — ignored, not attributed', 'no');
+    return;
+  }
   state.regions.pending = null;
-  state.regions.demoted.delete(target); // it answered — no longer a non-answerer
-  state.regions.answered.set(target, advertTs);
+  state.regions.demoted.delete(result.target); // it answered — no longer a non-answerer
+  state.regions.answered.set(result.target, result.advertTs);
   const fix = currentFix();
   state.queue.add({
-    kind: 'regions', at: new Date().toISOString(), target,
-    regions: r.regions, truncated: r.truncated, repeater_clock: r.repeaterClock,
+    kind: 'regions', at: new Date().toISOString(), target: result.target,
+    regions: result.regions, truncated: result.truncated, repeater_clock: result.repeaterClock,
     lat: fix ? fix.lat : null, lon: fix ? fix.lon : null, acc_m: fix ? fix.acc_m : null,
   });
-  dbg('regions ← ' + target.slice(0, 12) + '… declares: ' + (r.regions.join(',') || '(none)'), 'ok');
+  dbg('regions ← ' + result.target.slice(0, 12) + '… declares: ' + (result.regions.join(',') || '(none)'), 'ok');
 }
 
 function renderDiscoverStatus(dec) {
