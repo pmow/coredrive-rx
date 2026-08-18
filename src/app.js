@@ -233,8 +233,13 @@ function askRegions(target, frame) {
   // dereference so the timeout callback can't throw on a transport that's gone.
   function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onAck); }
   state.transport.onFrame(onAck);
-  state.transport.send(frame).catch((e) => { cleanup(); dbg('regions request failed: ' + e.message, 'no'); });
-  dbg('regions → asked ' + target.slice(0, 12) + '… for its declared list', 'tx');
+  // Log only once the write has actually gone out. Announcing the ask before the
+  // send settles printed "asked" beside "failed" for the same attempt, which read
+  // as a request that was made and then broke rather than one never sent.
+  state.transport.send(frame).then(
+    () => dbg('regions → asked ' + target.slice(0, 12) + '… for its declared list', 'tx'),
+    (e) => { cleanup(); dbg('regions request failed: ' + e.message, 'no'); },
+  );
 }
 
 // onRegionsFrame is a dedicated BLE frame listener for ANON_REQ_TYPE_REGIONS replies.

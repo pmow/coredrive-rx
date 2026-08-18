@@ -14,6 +14,7 @@ export class WebBluetoothTransport {
     this._listeners = [];
     this._onStatus = null;
     this._intentional = false; // true = user disconnected, don't auto-reconnect
+    this._writeChain = Promise.resolve(); // serialises GATT writes, see send()
   }
 
   // onFrame(cb): register a listener; cb receives a DataView per incoming frame.
@@ -69,9 +70,21 @@ export class WebBluetoothTransport {
     }
   }
 
+  // Web Bluetooth allows exactly ONE GATT operation in flight; a second write
+  // started before the first settles rejects with "GATT operation already in
+  // progress". Callers legitimately fire independently — region discovery rides
+  // the discover clock and lands in the same tick as the discover sweep — so
+  // serialise here rather than making every call site coordinate. Each caller
+  // still sees its OWN write's outcome; the chain itself swallows so one
+  // failure cannot poison every later send.
   async send(bytes) {
     if (!this.writeChar) throw new Error('not connected');
-    await this.writeChar.writeValue(bytes); // companion expects whole frame in one write
+    const mine = this._writeChain.then(() => {
+      if (!this.writeChar) throw new Error('not connected');
+      return this.writeChar.writeValue(bytes); // companion expects whole frame in one write
+    });
+    this._writeChain = mine.catch(() => {});
+    return mine;
   }
 
   isConnected() { return !!(this.device && this.device.gatt && this.device.gatt.connected); }
