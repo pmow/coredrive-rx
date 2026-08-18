@@ -85,16 +85,24 @@ export function parsePacket(bytes) {
   // node-discover reply (CONTROL/DISCOVER_RESP): payload is [flags][snr][tag×4][pubkey].
   // The pubkey (8-byte prefix or full 32) is the responder's identity — a direct, high-quality
   // heard_key, better than a path hash. Control payload bytes are unencrypted (firmware payloads.md).
+  // discoverType is the responder's node type (ADV_TYPE_*), carried in the low nibble
+  // of the flags byte alongside CTL_TYPE_NODE_DISCOVER_RESP in the upper nibble
+  // (examples/simple_repeater/MyMesh.cpp: `data[0] = CTL_TYPE_NODE_DISCOVER_RESP | ADV_TYPE_REPEATER`).
   let isDiscoverResp = false;
   let discoverPubkey = null;
+  let discoverType = null;
   if (payloadType === PAYLOAD_TYPE_CONTROL && off < bytes.length && (bytes[off] >> 4) === CTRL_DISCOVER_RESP) {
     isDiscoverResp = true;
+    discoverType = bytes[off] & 0x0f;
     const pkOff = off + 6; // skip flags(1) + snr(1) + tag(4)
     const pkLen = bytes.length - pkOff;
     if (pkLen === 8 || pkLen === 32) discoverPubkey = bytesToHex(bytes.slice(pkOff, pkOff + pkLen));
   }
 
-  return { routeType, payloadType, isAdvert, hops, advertPubkey, advertTs, advertType, isDiscoverResp, discoverPubkey };
+  return {
+    routeType, payloadType, isAdvert, hops, advertPubkey, advertTs, advertType,
+    isDiscoverResp, discoverPubkey, discoverType,
+  };
 }
 
 // deriveHeardKey applies the capture HARD RULE: record only the node heard

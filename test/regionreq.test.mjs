@@ -117,6 +117,22 @@ test('a demoted non-answerer is only chosen once no fresh candidate remains', ()
   assert.equal(selectNextTarget(only), 'a', 'demoted is still retried when it is all we have');
 });
 
+test('a discover-sourced candidate (advertTs null) is asked once, then not re-asked until a real advert arrives', () => {
+  // Discover-sourced candidates carry advertTs:null (no timestamp in a discover reply).
+  // due() is answered.get(pubkey) !== advertTs — null !== null is false, so once answered
+  // with the same null it goes quiet, exactly like an advert-sourced repeater with an
+  // unchanged timestamp.
+  const first = { candidates: [cand('a', null)], answered: new Map(), demoted: new Set(), cursor: 0 };
+  assert.equal(selectNextTarget(first), 'a', 'asked once');
+
+  const answeredNull = new Map([['a', null]]);
+  const second = { candidates: [cand('a', null)], answered: answeredNull, demoted: new Set(), cursor: 0 };
+  assert.equal(selectNextTarget(second), null, 'not re-asked while still only known via discover');
+
+  const third = { candidates: [cand('a', 12345)], answered: answeredNull, demoted: new Set(), cursor: 0 };
+  assert.equal(selectNextTarget(third), 'a', 're-asked once a real advert with a timestamp arrives');
+});
+
 test('no candidates yields null rather than throwing', () => {
   assert.equal(selectNextTarget({ candidates: [], answered: new Map(), demoted: new Set(), cursor: 0 }), null);
 });

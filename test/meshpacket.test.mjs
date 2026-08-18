@@ -35,6 +35,22 @@ test('node-discover reply → responder pubkey prefix (discover)', () => {
   assert.deepStrictEqual(hk, { heardKey: prefix, heardKeyLen: 8, src: 'discover' });
 });
 
+test('node-discover reply exposes discoverType (repeater) from the low nibble of flags', () => {
+  // flags 0x92: DISCOVER_RESP sub_type(9)<<4 | ADV_TYPE_REPEATER(2).
+  const prefix = '1122334455667788';
+  const raw = '2e' + '00' + '92' + '14' + 'deadbeef' + prefix;
+  const pkt = parsePacket(hexToBytes(raw));
+  assert.strictEqual(pkt.discoverType, 2);
+});
+
+test('node-discover reply exposes discoverType (non-repeater) from the low nibble of flags', () => {
+  // flags 0x90: DISCOVER_RESP sub_type(9)<<4 | node_type 0 (not ADV_TYPE_REPEATER).
+  const prefix = '1122334455667788';
+  const raw = '2e' + '00' + '90' + '14' + 'deadbeef' + prefix;
+  const pkt = parsePacket(hexToBytes(raw));
+  assert.strictEqual(pkt.discoverType, 0);
+});
+
 test('DIRECT packet with a path is not attributed (transmitter removed from front)', () => {
   // header: route DIRECT(2) | payload TXT_MSG(2<<2) = 0x0A. pathByte 0x41 (2-byte hashes, 1 hop),
   // hop 'aabb'. For direct routing path[last] is the route's far end, not the node we heard.

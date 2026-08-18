@@ -11,7 +11,7 @@ import { WebBluetoothTransport } from './transport.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
 import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
-import { resolveName } from './names.js';
+import { resolveName, resolvePubkey } from './names.js';
 import { upsertHeard, sameNode, addNodeKey } from './recent.js';
 import { updateMotion, captureDecision } from './motion.js';
 import { createWakeLock } from './wakelock.js';
@@ -183,7 +183,7 @@ function maybeQueryRegions() {
   if (!cfg || !cfg.regionDiscovery || !r.supported) return;
   const candidates = Array.from(r.candidates, ([pubkey, advertTs]) => ({ pubkey, advertTs }));
   const target = selectNextTarget({ candidates, answered: r.answered, demoted: r.demoted, cursor: r.cursor });
-  if (!target) return; // nothing worth asking this round — do not transmit
+  if (!target) { dbg('regions: due this round but no candidate to ask yet', 'st'); return; } // nothing worth asking this round — do not transmit
   const advertTs = r.candidates.get(target);
   // Build the frame BEFORE committing any scheduler state: buildRegionsRequest
   // throws on a malformed pubkey, and a throw here must not leave cursor/demoted/
@@ -453,6 +453,16 @@ async function processFrame(dv) {
   const regionsCfg = getConfig();
   if (regionsCfg && regionsCfg.regionDiscovery && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
     state.regions.candidates.set(hk.heardKey, pkt.advertTs);
+  }
+  // Discover responses are the common case (47h advert intervals mean real adverts are
+  // rare) but carry only an 8-byte pubkey prefix in practice — resolve to the full
+  // 32-byte pubkey ANON_REQ_TYPE_REGIONS must address before keying the candidate map,
+  // so the same repeater never appears twice under two different keys. advertTs is
+  // stored null: selectNextTarget's due() rule (answered.get(pubkey) !== advertTs)
+  // then asks it once per session and re-asks automatically if a real advert with a
+  // timestamp later arrives. Async and non-blocking — a failed resolve just adds nothing.
+  if (regionsCfg && regionsCfg.regionDiscovery && hk.src === 'discover' && pkt.discoverType === ADV_TYPE_REPEATER) {
+    resolvePubkey(hk.heardKey).then((pk) => { if (pk) state.regions.candidates.set(pk, null); });
   }
 
   noteHeard(hk.heardKey, hk.heardKeyLen, f.snr, f.rssi, hk.src); // show in the list even without a GPS fix
