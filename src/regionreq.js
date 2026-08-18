@@ -22,7 +22,7 @@ export const RESP_CODE_SENT = 6; // companion_radio/MyMesh.cpp:77 — shared by 
 // the last successfully appended name — and exportNamesTo trims that trailing comma
 // before returning. So the delivered CSV can be as short as 140 - 1 = 139 bytes while
 // still hiding a dropped 30-char name right after it. Flag at or above that floor.
-const TRUNCATION_WARN_BYTES = 139;
+export const TRUNCATION_WARN_BYTES = 139;
 
 export function buildRegionsRequest(pubkeyHex) {
   const pk = pubkeyHex.trim().toLowerCase();
@@ -59,7 +59,11 @@ export function parseRegionsResponse(bytes) {
     tag: v.getUint32(2, true),
     repeaterClock: v.getUint32(6, true),
     regions: csv.length ? csv.split(',') : [],
-    truncated: csv.length >= TRUNCATION_WARN_BYTES,
+    // Measured on the wire bytes, not csv.length: the firmware budget is bytes, and
+    // is_name_char accepts every byte >= 0x80, so an accented name costs more bytes
+    // than it does UTF-16 code units. Comparing the decoded length would under-flag
+    // exactly the lists most likely to have overflowed.
+    truncated: bytes.length - 10 >= TRUNCATION_WARN_BYTES,
   };
 }
 

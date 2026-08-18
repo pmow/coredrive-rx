@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildRegionsRequest, parseRegionsResponse, selectNextTarget, CMD_SEND_ANON_REQ,
-  parseSentAck, RESP_CODE_SENT, applyRegionsReply,
+  parseSentAck, RESP_CODE_SENT, applyRegionsReply, TRUNCATION_WARN_BYTES,
 } from '../src/regionreq.js';
 
 const PK = 'aa'.repeat(32);
@@ -47,7 +47,7 @@ test('parseRegionsResponse reads tag, clock and the CSV', () => {
 
 test('parseRegionsResponse flags a CSV near the 172-byte ceiling', () => {
   const long = Array.from({ length: 24 }, (_, i) => `be-x${String(i).padStart(2, '0')}`).join(',');
-  assert.ok(long.length > 160, 'fixture must exceed the flag threshold');
+  assert.ok(long.length > TRUNCATION_WARN_BYTES, 'fixture must exceed the flag threshold');
   const bytes = new Uint8Array([0x8c, 0, ...le32(1), ...le32(2), ...ascii(long)]);
   assert.equal(parseRegionsResponse(bytes).truncated, true);
 });
@@ -63,6 +63,18 @@ test('parseRegionsResponse flags a 139-byte CSV — the boundary that can still 
   assert.equal(long.length, 139, 'fixture must sit exactly on the derived boundary');
   const bytes = new Uint8Array([0x8c, 0, ...le32(1), ...le32(2), ...ascii(long)]);
   assert.equal(parseRegionsResponse(bytes).truncated, true, 'the new threshold must flag it');
+});
+
+test('parseRegionsResponse measures the boundary in bytes, not UTF-16 code units', () => {
+  // RegionMap::is_name_char accepts every byte >= 0x80, so accented region names are
+  // legal. Each 'eé' costs two bytes but one code unit, so this CSV is 139 bytes on
+  // the wire and 124 code units after decoding: a csv.length comparison would miss it.
+  const long = ['é'.repeat(15), 'b'.repeat(30), 'c'.repeat(30), 'd'.repeat(30), 'e'.repeat(15)].join(',');
+  const encoded = new TextEncoder().encode(long);
+  assert.equal(encoded.length, 139, 'fixture must sit on the derived byte boundary');
+  assert.ok(long.length < TRUNCATION_WARN_BYTES, 'and must fall short of it when counted as chars');
+  const bytes = new Uint8Array([0x8c, 0, ...le32(1), ...le32(2), ...encoded]);
+  assert.equal(parseRegionsResponse(bytes).truncated, true);
 });
 
 test('parseRegionsResponse rejects a wrong code and a short frame', () => {
