@@ -3,7 +3,6 @@
 // MAX_FRAME_SIZE=176; no length prefix / no reassembly needed).
 
 export const PUSH_CODE_LOG_RX_DATA = 0x88; // [0x88][snr×4 int8][rssi int8][raw packet...]
-export const RESP_CODE_STATS = 24; // [24][sub_type][...] — see rfstats.js
 
 function int8(b) { return b < 128 ? b : b - 256; }
 

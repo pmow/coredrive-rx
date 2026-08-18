@@ -100,7 +100,8 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
   "mqttUsername": "coredrive-rx",
   "mqttPassword": "<your publish-only EMQX account password>",
   "resolveUrl": "https://corescope.yourdomain/api/nodes/resolve",
-  "fullRfLog": false
+  "fullRfLog": false,
+  "rfSampler": false
 }
 ```
 > `mqttPassword` is a **publish-only, ACL-constrained** account — it is shipped to browsers, so treat
@@ -111,6 +112,13 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
 > ingestor also has `clientRxObservations.enabled: true`**: with it off, the ingestor decodes and
 > discards every one of these packets, writing no row and logging no warning, while `fullRfLog`
 > multiplies your normal upload volume. Confirm the ingestor-side flag with your CoreScope sysop
+> before turning this on. `rfSampler` is optional (default `false`); when `true`, the app polls the
+> companion's own radio counters (noise floor, RX/TX airtime, CRC errors) over local Bluetooth and
+> publishes them on `meshcore/client/<pubkey>/rf`. **Enable it only after your broker's ACL permits
+> that `/rf` subtopic for this client** — this app negotiates MQTT 3.1.1, whose PUBACK carries no
+> reason code, so a publish denied by the ACL is still acknowledged: the app logs `published N
+> record(s)` and looks healthy while the server receives zero rows. Confirm the topic is allowed
+> (and that the CoreScope ingestor has `clientRfSamples.enabled: true`) with your CoreScope sysop
 > before turning this on.
 
 Changing any value later is just a `config.json` edit + page refresh — no rebuild.

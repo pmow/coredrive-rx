@@ -1,6 +1,7 @@
 // Publishes buffered receptions to MQTT (over WebSocket/TLS) in the
 // meshcoretomqtt-compatible format CoreScope's ingestor consumes, on the
-// client topic meshcore/client/{PUBLIC_KEY}/packets.
+// client topics meshcore/client/{PUBLIC_KEY}/packets (receptions) and
+// meshcore/client/{PUBLIC_KEY}/rf (RF environment samples).
 import mqtt from 'mqtt';
 
 export class Publisher {
