@@ -216,7 +216,10 @@ function askRegions(target) {
     cleanup();
     dbg('regions: no send-ack for ' + target.slice(0, 12) + '… (tag never captured)', 'no');
   }, REGION_SENT_ACK_TIMEOUT_MS);
-  function cleanup() { clearTimeout(timer); state.transport.offFrame(onAck); }
+  // Disconnecting inside this window nulls state.transport (disconnectAll clears
+  // state.regions.pending but has no reference to this timer/listener) — guard the
+  // dereference so the timeout callback can't throw on a transport that's gone.
+  function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onAck); }
   state.transport.onFrame(onAck);
   state.transport.send(buildRegionsRequest(target)).catch((e) => { cleanup(); dbg('regions request failed: ' + e.message, 'no'); });
   dbg('regions → asked ' + target.slice(0, 12) + '… for its declared list', 'tx');
@@ -232,10 +235,16 @@ function onRegionsFrame(dv) {
   if (!parsed) return;
   const result = applyRegionsReply(state.regions.pending, parsed);
   if (!result.accepted) {
-    // Tag mismatch (or none captured yet) — a stray/late reply from an abandoned
-    // round. Do NOT clear pending: the real reply for the current target may still
-    // be on its way.
-    if (state.regions.pending) dbg('regions ← reply tag mismatch (got ' + parsed.tag + ') — ignored, not attributed', 'no');
+    // Do NOT clear pending either way: the real reply for the current target may
+    // still be on its way. Two different facts, logged differently — conflating
+    // them ("tag mismatch" for both) is exactly the kind of ambiguity that costs
+    // time in the field: an ack not back yet is normal and expected shortly, while
+    // an actual tag mismatch is a stray/late reply from an abandoned round.
+    if (state.regions.pending && state.regions.pending.tag == null) {
+      dbg('regions ← reply arrived before the send-ack tag was captured — ignored, not attributed', 'no');
+    } else if (state.regions.pending) {
+      dbg('regions ← reply tag mismatch (got ' + parsed.tag + ', want ' + state.regions.pending.tag + ') — stray/late reply, ignored', 'no');
+    }
     return;
   }
   state.regions.pending = null;
@@ -561,6 +570,13 @@ async function connectAll() {
 
     // Ensure the companion adverts with 2-byte path hashes — 1-byte mode produces
     // collision-prone IDs that our capture rule rejects, so the contribution is useless.
+    // state.regions.supported resets to false BEFORE the query: if requestDeviceInfo
+    // throws below, a stale `true` from an earlier connection (e.g. a prior device,
+    // or a prior successful connect this session) must never carry over — an
+    // unverified device would otherwise spend this feature's one airtime budget on
+    // firmware that silently ignores the request, indistinguishable from being out
+    // of range.
+    state.regions.supported = false;
     try {
       const di = await requestDeviceInfo(state.transport);
       if (di.pathHashMode === 0 || di.pathHashMode == null) {
@@ -575,13 +591,19 @@ async function connectAll() {
       // isn't already a saved contact (CMD_SEND_ANON_REQ, companion_radio/MyMesh.cpp).
       // di.fwVer IS that byte (RESP_CODE_DEVICE_INFO offset 1). Off by default in
       // config; when on but the firmware is too old, leave it off and say why —
-      // no silent failure.
+      // no silent failure. Both branches write the Settings line: reconnecting to a
+      // v13+ device after a v12 one must not leave a stale "off — firmware v12" on
+      // screen while the feature is actually live.
       state.regions.supported = di.fwVer >= REGION_DISCOVERY_MIN_FW;
       const regionsCfg = getConfig();
-      if (regionsCfg && regionsCfg.regionDiscovery && !state.regions.supported) {
-        els('regionsInfo').textContent = 'Region discovery: off — firmware v' + di.fwVer + ' (needs v' + REGION_DISCOVERY_MIN_FW + '+)';
+      if (regionsCfg && regionsCfg.regionDiscovery) {
+        if (state.regions.supported) {
+          els('regionsInfo').textContent = 'Region discovery: on';
+        } else {
+          els('regionsInfo').textContent = 'Region discovery: off — firmware v' + di.fwVer + ' (needs v' + REGION_DISCOVERY_MIN_FW + '+)';
+          dbg('region discovery disabled: firmware v' + di.fwVer + ' < ' + REGION_DISCOVERY_MIN_FW, 'no');
+        }
         els('regionsInfo').style.display = '';
-        dbg('region discovery disabled: firmware v' + di.fwVer + ' < ' + REGION_DISCOVERY_MIN_FW, 'no');
       }
     } catch (e) { dbg('hash-mode check skipped: ' + e.message); }
 
