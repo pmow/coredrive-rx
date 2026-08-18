@@ -15,6 +15,7 @@ export function normalizeConfig(raw) {
     resolveUrl: String(raw.resolveUrl || '').trim(),
     fullRfLog: !!raw.fullRfLog,
     rfSampler: !!raw.rfSampler,
+    regionDiscovery: !!raw.regionDiscovery,
   };
   if (!c.mqttUrl) throw new Error('config.json: "mqttUrl" is required');
   return c;

@@ -4,5 +4,6 @@
   "mqttPassword": "<publish-only EMQX account password>",
   "resolveUrl": "https://corescope.example/api/nodes/resolve",
   "fullRfLog": false,
-  "rfSampler": false
+  "rfSampler": false,
+  "regionDiscovery": false
 }

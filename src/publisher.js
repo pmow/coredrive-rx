@@ -1,7 +1,8 @@
 // Publishes buffered receptions to MQTT (over WebSocket/TLS) in the
 // meshcoretomqtt-compatible format CoreScope's ingestor consumes, on the
-// client topics meshcore/client/{PUBLIC_KEY}/packets (receptions) and
-// meshcore/client/{PUBLIC_KEY}/rf (RF environment samples).
+// client topics meshcore/client/{PUBLIC_KEY}/packets (receptions),
+// meshcore/client/{PUBLIC_KEY}/rf (RF environment samples) and
+// meshcore/client/{PUBLIC_KEY}/regions (region-discovery answers).
 import mqtt from 'mqtt';
 
 export class Publisher {
@@ -97,16 +98,35 @@ export class Publisher {
     return p;
   }
 
+  // buildRegionsPayload assembles one region-discovery answer. Additive: a new type
+  // on a new topic, so the /packets contract is unaffected. `target` is the repeater
+  // that was asked; `regions` may legitimately be [] (declares nothing) and must not
+  // be dropped or coerced. `truncated` is a hint the reply may have omitted names.
+  static buildRegionsPayload(rxPubkey, rec, name) {
+    return {
+      origin_id: rxPubkey,
+      origin: name || undefined,
+      timestamp: rec.at,
+      type: 'REGIONS',
+      target: rec.target,
+      regions: rec.regions,
+      truncated: rec.truncated,
+      repeater_clock: rec.repeater_clock,
+      gps: { lat: rec.lat, lon: rec.lon, acc_m: rec.acc_m },
+    };
+  }
+
   // topicFor / payloadFor dispatch on rec.kind. A record with NO kind is a
   // reception queued before this feature existed — it must keep working.
   static topicFor(rxPubkey, rec) {
-    return 'meshcore/client/' + rxPubkey + (rec.kind === 'rf' ? '/rf' : '/packets');
+    const suffix = rec.kind === 'rf' ? '/rf' : rec.kind === 'regions' ? '/regions' : '/packets';
+    return 'meshcore/client/' + rxPubkey + suffix;
   }
 
   static payloadFor(rxPubkey, rec, name) {
-    return rec.kind === 'rf'
-      ? Publisher.buildRfPayload(rxPubkey, rec, name)
-      : Publisher.buildPayload(rxPubkey, rec, name);
+    if (rec.kind === 'rf') return Publisher.buildRfPayload(rxPubkey, rec, name);
+    if (rec.kind === 'regions') return Publisher.buildRegionsPayload(rxPubkey, rec, name);
+    return Publisher.buildPayload(rxPubkey, rec, name);
   }
 
   // publish sends one reception; resolves on broker ack (QoS1). A dead socket never

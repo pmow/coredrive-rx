@@ -9,7 +9,7 @@
 // and diagnostics live on the Settings tab.
 import { WebBluetoothTransport } from './transport.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
-import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute } from './meshpacket.js';
+import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
 import { resolveName } from './names.js';
 import { upsertHeard, sameNode, addNodeKey } from './recent.js';
@@ -28,6 +28,12 @@ import { Publisher } from './publisher.js';
 import { loadConfig, getConfig } from './config.js';
 import { buildRfLogRecord } from './capture.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
+import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply } from './regionreq.js';
+
+// Region discovery needs FIRMWARE_VER_CODE >= 13 (companion_radio/MyMesh.cpp,
+// CMD_SEND_ANON_REQ's non-contact allowance) to address a repeater it hasn't
+// already got as a saved contact — which is the normal case out on a drive.
+const REGION_DISCOVERY_MIN_FW = 13;
 
 const els = (id) => document.getElementById(id);
 const state = {
@@ -43,6 +49,15 @@ const state = {
   lastHeardAt: null, lastFireAt: 0, tick: null,
   // RF environment sampler
   rfTimer: null, lastRfSample: null, rfGen: 0,
+  // Region discovery (ANON_REQ_TYPE_REGIONS) — round-robin scheduler state, ridden
+  // on the discover clock at half rate. candidates/answered/demoted/cursor feed
+  // selectNextTarget (src/regionreq.js) directly; round counts discover sweeps so
+  // every SECOND one queries a repeater; pending holds the one outstanding request
+  // this app ever has in flight; supported reflects the FIRMWARE_VER_CODE gate.
+  regions: {
+    candidates: new Map(), answered: new Map(), demoted: new Set(), cursor: 0,
+    round: 0, pending: null, supported: false,
+  },
 };
 
 const RECENT_MAX = 20;
@@ -151,6 +166,104 @@ function fireDiscover(now) {
   state.lastFireAt = now;
 }
 
+// --- Region discovery (outbound: what does a repeater CLAIM to forward?) ---
+// The ONLY part of this app that transmits addressed to one specific node, so it
+// rides the discover clock at half rate — one repeater asked per SECOND sweep —
+// never a fan-out over candidates. selectNextTarget (src/regionreq.js) is the pure
+// round-robin/demotion decision; this is wiring: call it, and if (and only if) it
+// names a target, send exactly one buildRegionsRequest.
+const REGION_SENT_ACK_TIMEOUT_MS = 4000;
+
+function maybeQueryRegions() {
+  if (!state.transport) return;
+  const r = state.regions;
+  r.round++;
+  if (r.round % 2 !== 0) return; // half rate: every second discover sweep only
+  const cfg = getConfig();
+  if (!cfg || !cfg.regionDiscovery || !r.supported) return;
+  const candidates = Array.from(r.candidates, ([pubkey, advertTs]) => ({ pubkey, advertTs }));
+  const target = selectNextTarget({ candidates, answered: r.answered, demoted: r.demoted, cursor: r.cursor });
+  if (!target) return; // nothing worth asking this round — do not transmit
+  const advertTs = r.candidates.get(target);
+  // Build the frame BEFORE committing any scheduler state: buildRegionsRequest
+  // throws on a malformed pubkey, and a throw here must not leave cursor/demoted/
+  // pending mutated for a request that was never sent — that would escape
+  // monitorTick and skip the rest of that tick's work.
+  const frame = buildRegionsRequest(target);
+  r.cursor++;
+  r.demoted.add(target); // demoted until it answers — silence must never look like "declared nothing"
+  // tag starts null: the reply-matcher (applyRegionsReply) treats a null tag as
+  // "not yet confirmed" and refuses to accept ANY reply until the RESP_CODE_SENT
+  // ack (captured below) fills it in — a reply must never be attributed on the
+  // sole evidence that a request happens to be pending.
+  r.pending = { target, advertTs, tag: null };
+  askRegions(target, frame);
+}
+
+// askRegions sends the request and listens for the immediate RESP_CODE_SENT ack to
+// capture the tag the eventual PUSH_CODE_BINARY_RESPONSE must match — the repeater
+// rate-limits and replies after a delay, and a DIFFERENT repeater is asked every
+// round, so a reply delayed past one round can land while another target is
+// pending. Matching on "something is pending" instead of on this tag would
+// attribute one repeater's declared regions to a different repeater and store it
+// as fact (see applyRegionsReply in src/regionreq.js for the actual decision).
+function askRegions(target, frame) {
+  const onAck = (dv) => {
+    const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+    const ack = parseSentAck(bytes);
+    if (!ack) return;
+    cleanup();
+    if (state.regions.pending && state.regions.pending.target === target) {
+      state.regions.pending.tag = ack.tag;
+    }
+  };
+  const timer = setTimeout(() => {
+    cleanup();
+    dbg('regions: no send-ack for ' + target.slice(0, 12) + '… (tag never captured)', 'no');
+  }, REGION_SENT_ACK_TIMEOUT_MS);
+  // Disconnecting inside this window nulls state.transport (disconnectAll clears
+  // state.regions.pending but has no reference to this timer/listener) — guard the
+  // dereference so the timeout callback can't throw on a transport that's gone.
+  function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onAck); }
+  state.transport.onFrame(onAck);
+  state.transport.send(frame).catch((e) => { cleanup(); dbg('regions request failed: ' + e.message, 'no'); });
+  dbg('regions → asked ' + target.slice(0, 12) + '… for its declared list', 'tx');
+}
+
+// onRegionsFrame is a dedicated BLE frame listener for ANON_REQ_TYPE_REGIONS replies.
+// parseRegionsResponse checks bytes[0] itself — it must see the RAW notification,
+// never parseFrame(...).data (parseFrame strips the leading code byte, which would
+// silently misfire this check and discard every reply with no error anywhere).
+function onRegionsFrame(dv) {
+  const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  const parsed = parseRegionsResponse(bytes);
+  if (!parsed) return;
+  const result = applyRegionsReply(state.regions.pending, parsed);
+  if (!result.accepted) {
+    // Do NOT clear pending either way: the real reply for the current target may
+    // still be on its way. Two different facts, logged differently — conflating
+    // them ("tag mismatch" for both) is exactly the kind of ambiguity that costs
+    // time in the field: an ack not back yet is normal and expected shortly, while
+    // an actual tag mismatch is a stray/late reply from an abandoned round.
+    if (state.regions.pending && state.regions.pending.tag == null) {
+      dbg('regions ← reply arrived before the send-ack tag was captured — ignored, not attributed', 'no');
+    } else if (state.regions.pending) {
+      dbg('regions ← reply tag mismatch (got ' + parsed.tag + ', want ' + state.regions.pending.tag + ') — stray/late reply, ignored', 'no');
+    }
+    return;
+  }
+  state.regions.pending = null;
+  state.regions.demoted.delete(result.target); // it answered — no longer a non-answerer
+  state.regions.answered.set(result.target, result.advertTs);
+  const fix = currentFix();
+  state.queue.add({
+    kind: 'regions', at: new Date().toISOString(), target: result.target,
+    regions: result.regions, truncated: result.truncated, repeater_clock: result.repeaterClock,
+    lat: fix ? fix.lat : null, lon: fix ? fix.lon : null, acc_m: fix ? fix.acc_m : null,
+  }).catch((e) => dbg('regions queue failed: ' + e.message, 'no'));
+  dbg('regions ← ' + result.target.slice(0, 12) + '… declares: ' + (result.regions.join(',') || '(none)'), 'ok');
+}
+
 function renderDiscoverStatus(dec) {
   const el = els('discStatus');
   if (!state.connected || dec.state === 'paused') { el.textContent = ''; return; }
@@ -179,7 +292,7 @@ function setPaused(paused) {
 function monitorTick() {
   const now = Date.now();
   const dec = discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused);
-  if (dec.fire) { fireDiscover(now); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused)); }
+  if (dec.fire) { fireDiscover(now); maybeQueryRegions(); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused)); }
   else renderDiscoverStatus(dec);
   state.snrPeakPct = decayPeak(state.snrPeakPct, state.snrBarPct, 1000);
   renderSnrMeter();
@@ -332,6 +445,16 @@ async function processFrame(dv) {
   // in an active area — back off discover so we don't poll on top of live traffic.
   if (isOrganicHeard(hk)) state.lastHeardAt = Date.now();
 
+  // Region-discovery candidates: only a 0-hop advert (hk.src === 'advert') carries the
+  // full pubkey ANON_REQ_TYPE_REGIONS needs to address, and only ADV_TYPE_REPEATER
+  // firmware implements the reply (simple_repeater/MyMesh.cpp) — a chat/room/sensor
+  // node would just be a request that can never be answered. advertTs tracks the
+  // node's own re-advert clock so selectNextTarget re-asks after a config edit.
+  const regionsCfg = getConfig();
+  if (regionsCfg && regionsCfg.regionDiscovery && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
+    state.regions.candidates.set(hk.heardKey, pkt.advertTs);
+  }
+
   noteHeard(hk.heardKey, hk.heardKeyLen, f.snr, f.rssi, hk.src); // show in the list even without a GPS fix
   state.rxTotal++;
   state.rxTimes.push(Date.now());
@@ -432,6 +555,7 @@ async function connectAll() {
   try {
     state.transport = new WebBluetoothTransport();
     state.transport.onFrame(processFrame);
+    state.transport.onFrame(onRegionsFrame); // no-op unless a region request is in flight
     state.transport.onStatus((s) => {
       dbg('BLE: ' + s);
       if (state.connected) log(s === 'connected' ? 'capturing' : 'BLE ' + s + '…');
@@ -451,6 +575,13 @@ async function connectAll() {
 
     // Ensure the companion adverts with 2-byte path hashes — 1-byte mode produces
     // collision-prone IDs that our capture rule rejects, so the contribution is useless.
+    // state.regions.supported resets to false BEFORE the query: if requestDeviceInfo
+    // throws below, a stale `true` from an earlier connection (e.g. a prior device,
+    // or a prior successful connect this session) must never carry over — an
+    // unverified device would otherwise spend this feature's one airtime budget on
+    // firmware that silently ignores the request, indistinguishable from being out
+    // of range.
+    state.regions.supported = false;
     try {
       const di = await requestDeviceInfo(state.transport);
       if (di.pathHashMode === 0 || di.pathHashMode == null) {
@@ -461,7 +592,36 @@ async function connectAll() {
         els('hashinfo').textContent = 'Path-hash mode: ' + (di.pathHashMode + 1) + '-byte ✓';
         dbg('path-hash mode already ' + di.pathHashMode + ' (' + (di.pathHashMode + 1) + '-byte)');
       }
-    } catch (e) { dbg('hash-mode check skipped: ' + e.message); }
+      // Region discovery needs FIRMWARE_VER_CODE >= 13 to address a repeater that
+      // isn't already a saved contact (CMD_SEND_ANON_REQ, companion_radio/MyMesh.cpp).
+      // di.fwVer IS that byte (RESP_CODE_DEVICE_INFO offset 1). Off by default in
+      // config; when on but the firmware is too old, leave it off and say why —
+      // no silent failure. Both branches write the Settings line: reconnecting to a
+      // v13+ device after a v12 one must not leave a stale "off — firmware v12" on
+      // screen while the feature is actually live.
+      state.regions.supported = di.fwVer >= REGION_DISCOVERY_MIN_FW;
+      const regionsCfg = getConfig();
+      if (regionsCfg && regionsCfg.regionDiscovery) {
+        if (state.regions.supported) {
+          els('regionsInfo').textContent = 'Region discovery: on';
+        } else {
+          els('regionsInfo').textContent = 'Region discovery: off — firmware v' + di.fwVer + ' (needs v' + REGION_DISCOVERY_MIN_FW + '+)';
+          dbg('region discovery disabled: firmware v' + di.fwVer + ' < ' + REGION_DISCOVERY_MIN_FW, 'no');
+        }
+        els('regionsInfo').style.display = '';
+      }
+    } catch (e) {
+      dbg('hash-mode check skipped: ' + e.message);
+      // requestDeviceInfo threw or timed out — state.regions.supported is still the
+      // false it was reset to above, but the "on" line written at DOMContentLoaded
+      // from config alone is still on screen. Without this, the user sees an enabled
+      // feature that will never transmit and is never told why.
+      const regionsCfg = getConfig();
+      if (regionsCfg && regionsCfg.regionDiscovery) {
+        els('regionsInfo').textContent = 'Region discovery: off — could not read firmware version';
+        els('regionsInfo').style.display = '';
+      }
+    }
 
     state.gps.start((fix) => {
       if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon);
@@ -583,6 +743,7 @@ async function disconnectAll(keepProgress) {
   renderPauseChip();
   clearInterval(state.tick); state.tick = null;
   stopRfSampler();
+  state.regions.pending = null; // no more frames will arrive on this transport to answer it
   els('discStatus').textContent = '';
   if (state.wakeLock) state.wakeLock.disable(); // let the screen sleep again
   if (state.publisher) { state.publisher.end(); state.publisher = null; }
@@ -602,6 +763,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     await loadConfig();
     els('fullRfLogInfo').style.display = getConfig().fullRfLog ? '' : 'none';
     els('rfSamplerInfo').style.display = getConfig().rfSampler ? '' : 'none';
+    if (getConfig().regionDiscovery) {
+      els('regionsInfo').textContent = 'Region discovery: on';
+      els('regionsInfo').style.display = '';
+    }
   } catch (e) {
     log('Config error: ' + e.message + ' — copy config.example.json to config.json and fill it in.');
   }

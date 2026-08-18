@@ -10,6 +10,7 @@ export const PAYLOAD_TYPE_ADVERT = 4;
 export const PAYLOAD_TYPE_TRACE = 9;   // path bytes are per-hop SNR, NOT hop hashes
 export const PAYLOAD_TYPE_CONTROL = 11; // 0x0B — control data (e.g. node-discover)
 export const CTRL_DISCOVER_RESP = 0x9;  // sub_type nibble (flags >> 4) of a DISCOVER_RESP
+export const ADV_TYPE_REPEATER = 2;     // appdata flags low nibble (AdvertDataHelpers.h)
 
 function isTransportRoute(rt) {
   return rt === ROUTE_TRANSPORT_FLOOD || rt === ROUTE_TRANSPORT_DIRECT;
@@ -67,6 +68,19 @@ export function parsePacket(bytes) {
   if (isAdvert && off + 32 <= bytes.length) {
     advertPubkey = bytesToHex(bytes.slice(off, off + 32)); // advert payload starts with the 32-byte pubkey
   }
+  // Advert layout: pubkey(32) + timestamp(4, LE) + signature(64) + appdata[flags(1)...].
+  // advertTs is the node's own re-advert clock — used to detect a config edit
+  // (region discovery re-asks a repeater when this changes). advertType's low
+  // nibble is ADV_TYPE_* (AdvertDataHelpers.h); only ADV_TYPE_REPEATER answers
+  // ANON_REQ_TYPE_REGIONS. Both null when the frame is too short to reach them.
+  let advertTs = null;
+  let advertType = null;
+  if (isAdvert && off + 36 <= bytes.length) {
+    advertTs = (bytes[off + 32] | (bytes[off + 33] << 8) | (bytes[off + 34] << 16) | (bytes[off + 35] << 24)) >>> 0;
+  }
+  if (isAdvert && off + 101 <= bytes.length) {
+    advertType = bytes[off + 100] & 0x0f;
+  }
 
   // node-discover reply (CONTROL/DISCOVER_RESP): payload is [flags][snr][tag×4][pubkey].
   // The pubkey (8-byte prefix or full 32) is the responder's identity — a direct, high-quality
@@ -80,7 +94,7 @@ export function parsePacket(bytes) {
     if (pkLen === 8 || pkLen === 32) discoverPubkey = bytesToHex(bytes.slice(pkOff, pkOff + pkLen));
   }
 
-  return { routeType, payloadType, isAdvert, hops, advertPubkey, isDiscoverResp, discoverPubkey };
+  return { routeType, payloadType, isAdvert, hops, advertPubkey, advertTs, advertType, isDiscoverResp, discoverPubkey };
 }
 
 // deriveHeardKey applies the capture HARD RULE: record only the node heard

@@ -48,3 +48,9 @@ test('rfSampler defaults to false', () => {
   assert.equal(normalizeConfig(base).rfSampler, false);
   assert.equal(normalizeConfig({ ...base, rfSampler: true }).rfSampler, true);
 });
+
+test('regionDiscovery defaults to false — this is the only transmitting feature, opt-in only', () => {
+  const base = { mqttUrl: 'wss://b.example/ws' };
+  assert.equal(normalizeConfig(base).regionDiscovery, false);
+  assert.equal(normalizeConfig({ ...base, regionDiscovery: true }).regionDiscovery, true);
+});

@@ -51,6 +51,33 @@ test('TRACE packet is not attributed via path bytes (SNR, not hops)', () => {
   assert.strictEqual(deriveHeardKey('rx', pkt), null);
 });
 
+test('0-hop advert exposes advertTs and advertType for region-discovery candidate tracking', () => {
+  // header 0x11 (route FLOOD(1), payload ADVERT(4<<2)), pathByte 0x00 (0 hops),
+  // pubkey(32) + timestamp(4, LE 0x12345678) + signature(64, zero-filled) + appdata
+  // flags(1) = 0x02 (ADV_TYPE_REPEATER, no name/loc).
+  const pubkey = 'ab'.repeat(32);
+  const raw = '11' + '00' + pubkey + '78563412' + '00'.repeat(64) + '02';
+  const pkt = parsePacket(hexToBytes(raw));
+  assert.strictEqual(pkt.advertTs, 0x12345678);
+  assert.strictEqual(pkt.advertType, 2);
+});
+
+test('a too-short advert leaves advertTs/advertType null rather than throwing', () => {
+  const pubkey = 'ab'.repeat(32);
+  const raw = '11' + '00' + pubkey + 'de'; // not even a full 4-byte timestamp, no appdata
+  const pkt = parsePacket(hexToBytes(raw));
+  assert.strictEqual(pkt.advertTs, null);
+  assert.strictEqual(pkt.advertType, null);
+});
+
+test('an advert with a timestamp but no appdata leaves advertType null (not out of bounds)', () => {
+  const pubkey = 'ab'.repeat(32);
+  const raw = '11' + '00' + pubkey + '78563412' + '00'.repeat(64); // timestamp + signature, no appdata
+  const pkt = parsePacket(hexToBytes(raw));
+  assert.strictEqual(pkt.advertTs, 0x12345678);
+  assert.strictEqual(pkt.advertType, null);
+});
+
 test('tx and 1-byte-last-hop are rejected', () => {
   const pkt = parsePacket(hexToBytes(RELAYED_ADVERT));
   assert.strictEqual(deriveHeardKey('tx', pkt), null);
