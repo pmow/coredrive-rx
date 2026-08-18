@@ -47,3 +47,25 @@ test('onStatus receives the event and its arg (e.g. error reason)', () => {
   p._emit('error', new Error('boom'));
   assert.deepStrictEqual(seen, [['reconnect', undefined], ['error', 'boom']]);
 });
+
+test('records without kind still go to /packets with the unchanged shape', () => {
+  const rec = { rx_at: '2026-08-17T10:00:00.000Z', raw: 'aabb', snr: 4.5, rssi: -101, lat: 51.2, lon: 4.4, acc_m: 8 };
+  assert.equal(Publisher.topicFor('aa11', rec), 'meshcore/client/aa11/packets');
+  const p = Publisher.payloadFor('aa11', rec, 'node');
+  assert.equal(p.type, 'PACKET');
+  assert.equal(p.raw, 'aabb');
+  assert.equal(p.gps.lat, 51.2);
+});
+
+test('kind rf goes to /rf with the RF_SAMPLE shape', () => {
+  const rec = { kind: 'rf', at: '2026-08-17T10:00:00.000Z', lat: 51.2, lon: 4.4, acc_m: 8,
+    stationary: true, uptime_secs: 84213, noise_floor: -119, rx_air_secs: 20877 };
+  assert.equal(Publisher.topicFor('aa11', rec), 'meshcore/client/aa11/rf');
+  const p = Publisher.payloadFor('aa11', rec, 'node');
+  assert.equal(p.type, 'RF_SAMPLE');
+  assert.equal(p.timestamp, '2026-08-17T10:00:00.000Z');
+  assert.equal(p.stationary, true);
+  assert.equal(p.noise_floor, -119);
+  assert.equal(p.gps.lat, 51.2);
+  assert.equal('recv_errors' in p, false, 'absent stays absent');
+});

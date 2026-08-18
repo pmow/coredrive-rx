@@ -66,12 +66,54 @@ export class Publisher {
     };
   }
 
+  // buildRfPayload assembles one RF environment sample. Additive: a new type on
+  // a new topic, so the /packets contract is unaffected.
+  static buildRfPayload(rxPubkey, rec, name) {
+    const p = {
+      origin_id: rxPubkey,
+      origin: name || undefined,
+      timestamp: rec.at,
+      type: 'RF_SAMPLE',
+      gps: { lat: rec.lat, lon: rec.lon, acc_m: rec.acc_m },
+      stationary: !!rec.stationary,
+      uptime_secs: rec.uptime_secs,
+      battery_mv: rec.battery_mv,
+      queue_len: rec.queue_len,
+      errors: rec.errors,
+      noise_floor: rec.noise_floor,
+      last_rssi: rec.last_rssi,
+      last_snr: rec.last_snr,
+      tx_air_secs: rec.tx_air_secs,
+      rx_air_secs: rec.rx_air_secs,
+      recv: rec.recv,
+      sent: rec.sent,
+      flood_rx: rec.flood_rx,
+      direct_rx: rec.direct_rx,
+      flood_tx: rec.flood_tx,
+      direct_tx: rec.direct_tx,
+    };
+    if ('recv_errors' in rec) p.recv_errors = rec.recv_errors;
+    return p;
+  }
+
+  // topicFor / payloadFor dispatch on rec.kind. A record with NO kind is a
+  // reception queued before this feature existed — it must keep working.
+  static topicFor(rxPubkey, rec) {
+    return 'meshcore/client/' + rxPubkey + (rec.kind === 'rf' ? '/rf' : '/packets');
+  }
+
+  static payloadFor(rxPubkey, rec, name) {
+    return rec.kind === 'rf'
+      ? Publisher.buildRfPayload(rxPubkey, rec, name)
+      : Publisher.buildPayload(rxPubkey, rec, name);
+  }
+
   // publish sends one reception; resolves on broker ack (QoS1). A dead socket never
   // acks, so the callback would hang forever — the timeout rejects instead, the record
   // stays buffered, and the drain loop lives on to retry after reconnect.
   publish(rxPubkey, rec, name, timeoutMs = 8000) {
-    const topic = 'meshcore/client/' + rxPubkey + '/packets';
-    const payload = JSON.stringify(Publisher.buildPayload(rxPubkey, rec, name));
+    const topic = Publisher.topicFor(rxPubkey, rec);
+    const payload = JSON.stringify(Publisher.payloadFor(rxPubkey, rec, name));
     const ack = new Promise((resolve, reject) => {
       this.client.publish(topic, payload, { qos: 1 }, (err) => (err ? reject(err) : resolve()));
     });
