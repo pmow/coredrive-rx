@@ -20,6 +20,7 @@ import { createLocalMap } from './localmap.js';
 import { hexCellAt } from './hexgrid.js';
 import {
   discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps,
+  regionDiscoverDue,
 } from './monitor.js';
 import { shareLog } from './sharelog.js';
 import { Gps } from './gps.js';
@@ -62,7 +63,7 @@ const state = {
   // this app ever has in flight; supported reflects the FIRMWARE_VER_CODE gate.
   regions: {
     candidates: new Map(), answered: new Map(), demoted: new Set(), cursor: 0,
-    round: 0, pending: null, supported: false,
+    lastAskAt: null, pending: null, supported: false,
     // overridePending: { target, raw, timer } while a saved contact's out_path is
     // temporarily forced to zero-hop for the ask currently in flight (see
     // prepareAndAskRegions / finishOverrideRound below). null the rest of the time.
@@ -193,10 +194,12 @@ const REGION_SENT_ACK_TIMEOUT_MS = 4000;
 function maybeQueryRegions() {
   if (!state.transport) return;
   const r = state.regions;
-  r.round++;
-  if (r.round % 2 !== 0) return; // half rate: every second discover sweep only
   const cfg = getConfig();
   if (!cfg || !cfg.regionDiscovery || !r.supported) return;
+  // Stamp the clock for this evaluation whatever the outcome. The tick asks
+  // regionDiscoverDue every second, so returning without stamping would re-enter
+  // (and re-log "no candidate") once a second instead of once a minute.
+  r.lastAskAt = Date.now();
   const candidates = Array.from(r.candidates, ([pubkey, advertTs]) => ({ pubkey, advertTs }));
   const target = selectNextTarget({ candidates, answered: r.answered, demoted: r.demoted, cursor: r.cursor });
   if (!target) { dbg('regions: due this round but no candidate to ask yet', 'st'); return; } // nothing worth asking this round — do not transmit
@@ -459,8 +462,11 @@ function setPaused(paused) {
 function monitorTick() {
   const now = Date.now();
   const dec = discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused);
-  if (dec.fire) { fireDiscover(now); maybeQueryRegions(); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused)); }
+  if (dec.fire) { fireDiscover(now); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused)); }
   else renderDiscoverStatus(dec);
+  // Region discovery runs on its own clock and is NOT gated on dec.fire, so the
+  // stationary pause cannot silence it — see regionDiscoverDue in monitor.js.
+  if (regionDiscoverDue(now, state.regions.lastAskAt)) maybeQueryRegions();
   state.snrPeakPct = decayPeak(state.snrPeakPct, state.snrBarPct, 1000);
   renderSnrMeter();
   state.rxTimes = pruneTimestamps(state.rxTimes, now);

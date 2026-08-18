@@ -5,8 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   discoverDecision, isOrganicHeard, snrToPct, decayPeak, pruneTimestamps,
-  DISCOVER_INTERVAL_MS, DISCOVER_BACKOFF_MS,
-} from '../src/monitor.js';
+  DISCOVER_INTERVAL_MS, DISCOVER_BACKOFF_MS, regionDiscoverDue, REGION_INTERVAL_MS } from '../src/monitor.js';
 
 test('discover fires immediately when never fired and channel quiet', () => {
   const d = discoverDecision(1000, null, 0, false);
@@ -73,4 +72,25 @@ test('capture-rate window drops entries older than 60 s', () => {
   const times = [now - 70000, now - 30000, now - 1000, now];
   const kept = pruneTimestamps(times, now);
   assert.strictEqual(kept.length, 3); // the 70 s-old one is gone
+});
+
+// --- Region discovery cadence (deliberately independent of the stationary pause) ---
+
+test('regionDiscoverDue fires on first evaluation', () => {
+  assert.equal(regionDiscoverDue(1_000_000, null), true);
+});
+
+test('regionDiscoverDue holds off until the interval has elapsed', () => {
+  const t0 = 1_000_000;
+  assert.equal(regionDiscoverDue(t0 + 59_999, t0), false);
+  assert.equal(regionDiscoverDue(t0 + REGION_INTERVAL_MS, t0), true);
+});
+
+test('regionDiscoverDue ignores the stationary pause entirely — it takes no paused argument', () => {
+  // The regression this guards: region discovery used to ride the discover clock,
+  // which discoverDecision short-circuits when paused, so a parked app never asked
+  // a single repeater. A repeater's declared regions do not depend on our position.
+  const t0 = 1_000_000;
+  assert.equal(discoverDecision(t0 + 999_999, null, t0, true).fire, false, 'discover stays paused');
+  assert.equal(regionDiscoverDue(t0 + 999_999, t0), true, 'region discovery is due regardless');
 });
