@@ -42,7 +42,7 @@ const state = {
   // auto-discover
   lastHeardAt: null, lastFireAt: 0, tick: null,
   // RF environment sampler
-  rfTimer: null, lastRfSample: null,
+  rfTimer: null, lastRfSample: null, rfGen: 0,
 };
 
 const RECENT_MAX = 20;
@@ -518,6 +518,16 @@ function startRfSampler() {
   const cfg = getConfig();
   if (!cfg || !cfg.rfSampler) return;
 
+  // Generation guard: a tick awaits state.queue.add(sample) mid-cycle. If
+  // disconnectAll() → stopRfSampler() → startRfSampler() (reconnect) all happen
+  // during that await, the stale tick would otherwise resume, overwrite the new
+  // session's state.rfTimer with its own reschedule, and run a second concurrent
+  // tick loop against this closure's now-orphaned `pending` map. Each session
+  // bumps state.rfGen; a tick only reschedules itself if its captured
+  // generation is still current.
+  state.rfGen += 1;
+  const myGen = state.rfGen;
+
   const pending = new Map(); // subType -> resolve
   state.transport.onFrame((dvFrame) => {
     const bytes = new Uint8Array(dvFrame.buffer, dvFrame.byteOffset, dvFrame.byteLength);
@@ -554,6 +564,7 @@ function startRfSampler() {
         dbg('rf sample incomplete — discarded', 'no');
       }
     }
+    if (state.rfGen !== myGen) return; // superseded by a disconnect/reconnect during the await above
     state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
   };
 
@@ -561,6 +572,7 @@ function startRfSampler() {
 }
 
 function stopRfSampler() {
+  state.rfGen += 1; // invalidate any tick currently mid-await so it will not reschedule itself
   if (state.rfTimer) { clearTimeout(state.rfTimer); state.rfTimer = null; }
 }
 
