@@ -9,11 +9,20 @@ export const PUSH_CODE_BINARY_RESPONSE = 0x8c;
 export const ANON_REQ_TYPE_REGIONS = 0x01;
 export const RESP_CODE_SENT = 6; // companion_radio/MyMesh.cpp:77 — shared by every CMD_SEND_* path
 
-// The repeater's CSV budget is sizeof(reply_data) - 12 = 172 bytes. exportNamesTo
-// SKIPS names that do not fit and keeps going, so an overflowing list has holes
-// rather than being a truncated prefix — there is no marker to detect. Flag when
-// the CSV is close enough to the ceiling that a name could have been dropped.
-const TRUNCATION_WARN_BYTES = 160;
+// The repeater's CSV budget is sizeof(reply_data) - 12 = 172 bytes (MAX_PACKET_PAYLOAD
+// 184, minus the 12-byte handleAnonRegionsReq/MyMesh.cpp header room). exportNamesTo
+// (RegionMap.cpp) SKIPS a name that does not fit and keeps going, so an overflowing
+// list has holes rather than being a truncated prefix — there is no marker to detect.
+//
+// Derivation of the threshold (RegionMap.cpp exportNamesTo): a name of length L is
+// dropped once the bytes already written, W, satisfy `W + L + 2 >= max_len`. The
+// longest possible name is L = sizeof(RegionEntry::name) - 1 = 31 - 1 = 30, so the
+// drop can occur as early as W = max_len - L - 2 = 172 - 30 - 2 = 140. At that point
+// the buffer holds exactly those 140 bytes, ending in the trailing comma written by
+// the last successfully appended name — and exportNamesTo trims that trailing comma
+// before returning. So the delivered CSV can be as short as 140 - 1 = 139 bytes while
+// still hiding a dropped 30-char name right after it. Flag at or above that floor.
+const TRUNCATION_WARN_BYTES = 139;
 
 export function buildRegionsRequest(pubkeyHex) {
   const pk = pubkeyHex.trim().toLowerCase();

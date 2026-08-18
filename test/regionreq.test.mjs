@@ -52,6 +52,19 @@ test('parseRegionsResponse flags a CSV near the 172-byte ceiling', () => {
   assert.equal(parseRegionsResponse(bytes).truncated, true);
 });
 
+test('parseRegionsResponse flags a 139-byte CSV — the boundary that can still hide a dropped 30-char name', () => {
+  // Worst case per firmware RegionMap.cpp exportNamesTo: max_len = MAX_PACKET_PAYLOAD(184) - 12 = 172.
+  // A name of the maximum length L = sizeof(RegionEntry::name) - 1 = 30 is dropped once the bytes
+  // already written W reach `max_len - L - 2` = 140. At that instant the buffer holds 140 bytes
+  // ending in a trailing comma, which exportNamesTo then trims — so the delivered CSV can be as
+  // short as 139 bytes while a further 30-char name was silently dropped right after it.
+  // Fixture: four 30-char names plus one 15-char name, comma-joined, totals exactly 139 bytes.
+  const long = ['a'.repeat(30), 'b'.repeat(30), 'c'.repeat(30), 'd'.repeat(30), 'e'.repeat(15)].join(',');
+  assert.equal(long.length, 139, 'fixture must sit exactly on the derived boundary');
+  const bytes = new Uint8Array([0x8c, 0, ...le32(1), ...le32(2), ...ascii(long)]);
+  assert.equal(parseRegionsResponse(bytes).truncated, true, 'the new threshold must flag it');
+});
+
 test('parseRegionsResponse rejects a wrong code and a short frame', () => {
   assert.equal(parseRegionsResponse(new Uint8Array([0x88, 0, 1, 2])), null);
   assert.equal(parseRegionsResponse(new Uint8Array([0x8c, 0, 1, 2])), null);

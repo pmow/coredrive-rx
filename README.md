@@ -101,7 +101,8 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
   "mqttPassword": "<your publish-only EMQX account password>",
   "resolveUrl": "https://corescope.yourdomain/api/nodes/resolve",
   "fullRfLog": false,
-  "rfSampler": false
+  "rfSampler": false,
+  "regionDiscovery": false
 }
 ```
 > `mqttPassword` is a **publish-only, ACL-constrained** account — it is shipped to browsers, so treat
@@ -119,7 +120,15 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
 > reason code, so a publish denied by the ACL is still acknowledged: the app logs `published N
 > record(s)` and looks healthy while the server receives zero rows. Confirm the topic is allowed
 > (and that the CoreScope ingestor has `clientRfSamples.enabled: true`) with your CoreScope sysop
-> before turning this on.
+> before turning this on. `regionDiscovery` is optional (default `false`); when `true`, this is the
+> **only** part of the app that transmits: once connected it addresses one repeater at a time,
+> round-robin, asking for its declared flood-allowed region list roughly every 60 seconds, and
+> publishes the answer on `meshcore/client/<pubkey>/regions`. It requires companion firmware **v13+**
+> — on older firmware the app logs why and never sends. **Enable it only after your broker's ACL
+> permits that `/regions` subtopic for this client**, for the same silent-PUBACK reason as `rfSampler`
+> above. Confirm the topic is allowed (and that the CoreScope ingestor has `clientRegions.enabled:
+> true`) with your CoreScope sysop before turning this on — otherwise the ingestor decodes and
+> discards every upload, same as `fullRfLog` off.
 
 Changing any value later is just a `config.json` edit + page refresh — no rebuild.
 

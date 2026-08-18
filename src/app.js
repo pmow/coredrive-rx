@@ -185,6 +185,11 @@ function maybeQueryRegions() {
   const target = selectNextTarget({ candidates, answered: r.answered, demoted: r.demoted, cursor: r.cursor });
   if (!target) return; // nothing worth asking this round — do not transmit
   const advertTs = r.candidates.get(target);
+  // Build the frame BEFORE committing any scheduler state: buildRegionsRequest
+  // throws on a malformed pubkey, and a throw here must not leave cursor/demoted/
+  // pending mutated for a request that was never sent — that would escape
+  // monitorTick and skip the rest of that tick's work.
+  const frame = buildRegionsRequest(target);
   r.cursor++;
   r.demoted.add(target); // demoted until it answers — silence must never look like "declared nothing"
   // tag starts null: the reply-matcher (applyRegionsReply) treats a null tag as
@@ -192,7 +197,7 @@ function maybeQueryRegions() {
   // ack (captured below) fills it in — a reply must never be attributed on the
   // sole evidence that a request happens to be pending.
   r.pending = { target, advertTs, tag: null };
-  askRegions(target);
+  askRegions(target, frame);
 }
 
 // askRegions sends the request and listens for the immediate RESP_CODE_SENT ack to
@@ -202,7 +207,7 @@ function maybeQueryRegions() {
 // pending. Matching on "something is pending" instead of on this tag would
 // attribute one repeater's declared regions to a different repeater and store it
 // as fact (see applyRegionsReply in src/regionreq.js for the actual decision).
-function askRegions(target) {
+function askRegions(target, frame) {
   const onAck = (dv) => {
     const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
     const ack = parseSentAck(bytes);
@@ -221,7 +226,7 @@ function askRegions(target) {
   // dereference so the timeout callback can't throw on a transport that's gone.
   function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onAck); }
   state.transport.onFrame(onAck);
-  state.transport.send(buildRegionsRequest(target)).catch((e) => { cleanup(); dbg('regions request failed: ' + e.message, 'no'); });
+  state.transport.send(frame).catch((e) => { cleanup(); dbg('regions request failed: ' + e.message, 'no'); });
   dbg('regions → asked ' + target.slice(0, 12) + '… for its declared list', 'tx');
 }
 
@@ -255,7 +260,7 @@ function onRegionsFrame(dv) {
     kind: 'regions', at: new Date().toISOString(), target: result.target,
     regions: result.regions, truncated: result.truncated, repeater_clock: result.repeaterClock,
     lat: fix ? fix.lat : null, lon: fix ? fix.lon : null, acc_m: fix ? fix.acc_m : null,
-  });
+  }).catch((e) => dbg('regions queue failed: ' + e.message, 'no'));
   dbg('regions ← ' + result.target.slice(0, 12) + '… declares: ' + (result.regions.join(',') || '(none)'), 'ok');
 }
 
@@ -605,7 +610,18 @@ async function connectAll() {
         }
         els('regionsInfo').style.display = '';
       }
-    } catch (e) { dbg('hash-mode check skipped: ' + e.message); }
+    } catch (e) {
+      dbg('hash-mode check skipped: ' + e.message);
+      // requestDeviceInfo threw or timed out — state.regions.supported is still the
+      // false it was reset to above, but the "on" line written at DOMContentLoaded
+      // from config alone is still on screen. Without this, the user sees an enabled
+      // feature that will never transmit and is never told why.
+      const regionsCfg = getConfig();
+      if (regionsCfg && regionsCfg.regionDiscovery) {
+        els('regionsInfo').textContent = 'Region discovery: off — could not read firmware version';
+        els('regionsInfo').style.display = '';
+      }
+    }
 
     state.gps.start((fix) => {
       if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon);
