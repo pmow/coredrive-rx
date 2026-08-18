@@ -48,3 +48,17 @@ test('an already-resolved name passes through; an unresolved one is empty string
   const rows2 = regionsRows([{ target: pk(2), regions: [], truncated: false }]);
   assert.equal(rows2[0].name, '');
 });
+
+test("'*' is split out of the region list — it declares unscoped floods, not a scope", () => {
+  const rows = regionsRows([{ target: 'aa'.repeat(32), regions: ['*', 'be', 'be-vli'], truncated: false }]);
+  assert.deepEqual(rows[0].regions, ['be', 'be-vli'], "'*' must not appear among the region names");
+  assert.equal(rows[0].unscoped, true);
+  assert.equal(rows[0].declaresNothing, false);
+});
+
+test("a repeater declaring ONLY '*' declares no regions but does forward unscoped floods", () => {
+  const rows = regionsRows([{ target: 'bb'.repeat(32), regions: ['*'], truncated: false }]);
+  assert.deepEqual(rows[0].regions, []);
+  assert.equal(rows[0].unscoped, true);
+  assert.equal(rows[0].declaresNothing, true, 'no scoped regions is still "declares nothing" on the scope axis');
+});

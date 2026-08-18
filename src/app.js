@@ -362,7 +362,10 @@ function renderRegionsCard() {
   els('regionsList').innerHTML = rows.map((r) => {
     const label = r.name ? esc(r.name) : '<span class="rk">' + r.target.slice(0, 12) + '…</span>';
     const regionsCls = r.declaresNothing ? 'rgregions none' : 'rgregions';
-    const regionsText = r.declaresNothing ? 'declares nothing flood-allowed' : esc(r.regions.join(', '));
+    // '*' is not a region name — it declares that plain, unscoped floods are
+    // forwarded. Shown as a separate marker so it cannot be read as a scope.
+    const unscopedTag = r.unscoped ? '<span class="rgunscoped">+ unscoped</span>' : '';
+    const regionsText = (r.declaresNothing ? 'declares no regions flood-allowed' : esc(r.regions.join(', '))) + unscopedTag;
     const warn = r.truncated ? '<div class="rgwarn">⚠ truncated — some regions may be missing</div>' : '';
     return '<div class="rgrow"><div class="rgname">' + label + '</div>' +
       '<div class="' + regionsCls + '">' + regionsText + '</div>' + warn + '</div>';
