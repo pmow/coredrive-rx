@@ -27,6 +27,7 @@ import { Queue } from './queue.js';
 import { Publisher } from './publisher.js';
 import { loadConfig, getConfig } from './config.js';
 import { buildRfLogRecord } from './capture.js';
+import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
 
 const els = (id) => document.getElementById(id);
 const state = {
@@ -40,6 +41,8 @@ const state = {
   lastHeard: null, snrBarPct: 0, snrPeakPct: 0,
   // auto-discover
   lastHeardAt: null, lastFireAt: 0, tick: null,
+  // RF environment sampler
+  rfTimer: null, lastRfSample: null,
 };
 
 const RECENT_MAX = 20;
@@ -486,6 +489,7 @@ async function connectAll() {
     setButton();
     state.lastFireAt = 0; // fire a discover sweep immediately on the first tick
     state.tick = setInterval(monitorTick, 1000);
+    startRfSampler();
     log('capturing as ' + (info.name || state.companionPubkey.slice(0, 12)));
     switchView('home'); // connected → jump to the live monitor
 
@@ -499,12 +503,74 @@ async function connectAll() {
   refreshCounters();
 }
 
+// RF environment sampler. Three local BLE queries per tick — nothing goes on
+// the air. Whole-sample-or-nothing: a tick that does not collect all three
+// responses within RF_TIMEOUT_MS is discarded, because a partial sample would
+// skew whichever delta chain it landed in on the server.
+const RF_TIMEOUT_MS = 2000;
+
+function renderRfSampler() {
+  if (!state.lastRfSample) return;
+  els('rfSamplerInfo').textContent = 'RF: ' + state.lastRfSample.noise_floor + ' dBm · RX air ' + state.lastRfSample.rx_air_secs + ' s';
+}
+
+function startRfSampler() {
+  const cfg = getConfig();
+  if (!cfg || !cfg.rfSampler) return;
+
+  const pending = new Map(); // subType -> resolve
+  state.transport.onFrame((dvFrame) => {
+    const bytes = new Uint8Array(dvFrame.buffer, dvFrame.byteOffset, dvFrame.byteLength);
+    const s = parseStats(bytes);
+    if (!s) return;
+    const resolve = pending.get(s.subType);
+    if (resolve) { pending.delete(s.subType); resolve(s); }
+  });
+
+  const ask = (subType) => new Promise((resolve) => {
+    const timer = setTimeout(() => { pending.delete(subType); resolve(null); }, RF_TIMEOUT_MS);
+    pending.set(subType, (v) => { clearTimeout(timer); resolve(v); });
+    state.transport.send(buildStatsRequest(subType)).catch(() => {
+      clearTimeout(timer);
+      pending.delete(subType);
+      resolve(null);
+    });
+  });
+
+  const tick = async () => {
+    if (!state.transport || !state.companionPubkey) return;
+    const fix = currentFix();
+    if (fix) {
+      const core = await ask(STATS_CORE);
+      const radio = await ask(STATS_RADIO);
+      const packets = await ask(STATS_PACKETS);
+      const sample = mergeSample(core, radio, packets, fix, new Date().toISOString(), state.motion ? state.motion.paused : false);
+      if (sample) {
+        await state.queue.add(sample);
+        state.lastRfSample = sample; // Settings diagnostics line
+        renderRfSampler();
+        dbg('rf sample noise=' + sample.noise_floor + 'dBm rx_air=' + sample.rx_air_secs + 's', 'st');
+      } else {
+        dbg('rf sample incomplete — discarded', 'no');
+      }
+    }
+    state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
+  };
+
+  state.rfTimer = setTimeout(tick, nextSampleDelay(state.motion ? state.motion.paused : false));
+}
+
+function stopRfSampler() {
+  if (state.rfTimer) { clearTimeout(state.rfTimer); state.rfTimer = null; }
+}
+
 async function disconnectAll(keepProgress) {
   state.connected = false;
   state.motion = null;
   state.paused = false;
   renderPauseChip();
   clearInterval(state.tick); state.tick = null;
+  stopRfSampler();
   els('discStatus').textContent = '';
   if (state.wakeLock) state.wakeLock.disable(); // let the screen sleep again
   if (state.publisher) { state.publisher.end(); state.publisher = null; }
@@ -523,6 +589,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   try {
     await loadConfig();
     els('fullRfLogInfo').style.display = getConfig().fullRfLog ? '' : 'none';
+    els('rfSamplerInfo').style.display = getConfig().rfSampler ? '' : 'none';
   } catch (e) {
     log('Config error: ' + e.message + ' — copy config.example.json to config.json and fill it in.');
   }

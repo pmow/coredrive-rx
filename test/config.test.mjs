@@ -42,3 +42,9 @@ test('fullRfLog defaults to false and accepts true', () => {
   assert.equal(normalizeConfig({ ...base, fullRfLog: 'yes' }).fullRfLog, true);
   assert.equal(normalizeConfig({ ...base, fullRfLog: 0 }).fullRfLog, false);
 });
+
+test('rfSampler defaults to false', () => {
+  const base = { mqttUrl: 'wss://b.example/ws' };
+  assert.equal(normalizeConfig(base).rfSampler, false);
+  assert.equal(normalizeConfig({ ...base, rfSampler: true }).rfSampler, true);
+});

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildStatsRequest, parseStats, mergeSample,
+  buildStatsRequest, parseStats, mergeSample, nextSampleDelay, MOVING_MS, PARKED_MS,
   CMD_GET_STATS, STATS_CORE, STATS_RADIO, STATS_PACKETS,
 } from '../src/rfstats.js';
 
@@ -70,4 +70,11 @@ test('mergeSample requires all three parts', () => {
   assert.equal(s.noise_floor, -119);
   assert.equal(s.lat, 51.2);
   assert.equal('recv_errors' in s, false, 'absent upstream stays absent downstream');
+});
+
+test('cadence is 15s moving, 5min parked', () => {
+  assert.equal(MOVING_MS, 15000);
+  assert.equal(PARKED_MS, 300000);
+  assert.equal(nextSampleDelay(false), MOVING_MS);
+  assert.equal(nextSampleDelay(true), PARKED_MS);
 });

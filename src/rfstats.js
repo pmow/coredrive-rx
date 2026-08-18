@@ -100,3 +100,14 @@ export function mergeSample(core, radio, packets, fix, atISO, stationary) {
   if ('recv_errors' in packets) s.recv_errors = packets.recv_errors;
   return s;
 }
+
+// Cadence. A stationary RF sample is NOT redundant the way a stationary
+// reception is — the noise floor at one spot genuinely changes over the day —
+// so the sampler slows down instead of stopping. The `stationary` flag on each
+// sample keeps a long park from swamping its hex cell's median.
+export const MOVING_MS = 15000;
+export const PARKED_MS = 300000;
+
+export function nextSampleDelay(paused) {
+  return paused ? PARKED_MS : MOVING_MS;
+}
