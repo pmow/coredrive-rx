@@ -99,12 +99,19 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
   "mqttUrl": "wss://broker.yourdomain:8084/ws",
   "mqttUsername": "coredrive-rx",
   "mqttPassword": "<your publish-only EMQX account password>",
-  "resolveUrl": "https://corescope.yourdomain/api/nodes/resolve"
+  "resolveUrl": "https://corescope.yourdomain/api/nodes/resolve",
+  "fullRfLog": false
 }
 ```
 > `mqttPassword` is a **publish-only, ACL-constrained** account — it is shipped to browsers, so treat
 > it as shared, not a secret. `resolveUrl` is optional (see CORS below); omit it and the app shows
-> heard-key prefixes instead of node names.
+> heard-key prefixes instead of node names. `fullRfLog` is optional (default `false`); when `true`,
+> packets the direct-only rule can't attribute (a DIRECT-route path, or noise) are queued and
+> published too, as diagnostic-only rows — never coverage. **This is pure waste unless the CoreScope
+> ingestor also has `clientRxObservations.enabled: true`**: with it off, the ingestor decodes and
+> discards every one of these packets, writing no row and logging no warning, while `fullRfLog`
+> multiplies your normal upload volume. Confirm the ingestor-side flag with your CoreScope sysop
+> before turning this on.
 
 Changing any value later is just a `config.json` edit + page refresh — no rebuild.
 

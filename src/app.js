@@ -292,14 +292,19 @@ async function processFrame(dv) {
     // transmitter removed itself from the path's front), and 1-byte hops are collision-prone —
     // both are called out. Everything else (tx / no advert) is pure noise, verbose only.
     const lastHop = pkt && pkt.hops.length ? pkt.hops[pkt.hops.length - 1] : null;
-    const logged = getConfig() && getConfig().fullRfLog;
+    const cfg = getConfig();
+    const logged = cfg && cfg.fullRfLog;
     const suffix = logged ? ', logged' : ', skipped';
     if (lastHop && pkt.hops.length && !isFloodRoute(pkt.routeType)) dbg('direct route — transmitter not in path' + suffix, 'st');
     else if (lastHop && lastHop.length === 2) dbg('1-byte path-hash (' + lastHop + ') — seen' + suffix, 'st');
     else if (state.verbose) dbg('not attributable (tx / no advert)' + suffix + sig, 'no');
 
-    // fullRfLog: the packet is not coverage and must move NO coverage state —
-    // no counters, no SNR meter, no hex, no beep. It is queued and nothing else.
+    // fullRfLog: the packet is not coverage, so the counters, SNR meter,
+    // recently-heard list, beeper and map hexes must not move. The motion/
+    // idle-gate state below IS deliberately shared with the coverage path —
+    // updateMotion is a pure function of the latest GPS fix and now, the same
+    // fix already drives it on every GPS callback, and applying the idle gate
+    // here is the point (a stationary phone shouldn't queue RF-log rows either).
     if (!logged) return;
     const rfFix = currentFix();
     let rfCapture = false;
@@ -310,7 +315,7 @@ async function processFrame(dv) {
       rfCapture = rfDec.capture;
     }
     const rfRec = buildRfLogRecord({
-      hk, fullRfLog: true, rawHex, snr: f.snr, rssi: f.rssi,
+      hk, fullRfLog: logged, rawHex, snr: f.snr, rssi: f.rssi,
       fix: rfFix, captureAllowed: rfCapture, nowISO: new Date().toISOString(),
     });
     if (!rfRec) return;
