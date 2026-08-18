@@ -69,3 +69,33 @@ test('kind rf goes to /rf with the RF_SAMPLE shape', () => {
   assert.equal(p.gps.lat, 51.2);
   assert.equal('recv_errors' in p, false, 'absent stays absent');
 });
+
+test('kind regions goes to /regions with the REGIONS shape', () => {
+  const rec = { kind: 'regions', at: '2026-08-18T10:00:00.000Z', target: 'bb'.repeat(32),
+    regions: ['*', 'be'], truncated: false, repeater_clock: 1755518096, lat: 51.2, lon: 4.4, acc_m: 8 };
+  assert.equal(Publisher.topicFor('aa11', rec), 'meshcore/client/aa11/regions');
+  const p = Publisher.payloadFor('aa11', rec, 'node');
+  assert.equal(p.type, 'REGIONS');
+  assert.deepEqual(p.regions, ['*', 'be']);
+  assert.equal(p.target, rec.target);
+  assert.equal(p.gps.lat, 51.2);
+});
+
+test('an rf record and a record with no kind are unaffected by the third branch', () => {
+  assert.equal(Publisher.topicFor('aa11', { kind: 'rf', at: 't' }), 'meshcore/client/aa11/rf');
+  assert.equal(Publisher.topicFor('aa11', { rx_at: 't', raw: 'aa' }), 'meshcore/client/aa11/packets');
+});
+
+test('an empty regions array survives the wire as [], not dropped or coerced', () => {
+  const rec = { kind: 'regions', at: '2026-08-18T10:00:00.000Z', target: 'cc'.repeat(32),
+    regions: [], truncated: false, repeater_clock: 1755518096, lat: null, lon: null, acc_m: null };
+  const p = Publisher.payloadFor('aa11', rec, 'node');
+  assert.deepEqual(p.regions, []);
+});
+
+test('truncated is carried faithfully, true and false alike', () => {
+  const base = { kind: 'regions', at: 't', target: 'dd'.repeat(32), regions: ['*'],
+    repeater_clock: 1, lat: null, lon: null, acc_m: null };
+  assert.equal(Publisher.payloadFor('aa11', { ...base, truncated: true }, 'node').truncated, true);
+  assert.equal(Publisher.payloadFor('aa11', { ...base, truncated: false }, 'node').truncated, false);
+});
