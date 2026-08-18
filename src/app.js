@@ -30,6 +30,11 @@ import { buildRfLogRecord } from './capture.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
 import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply } from './regionreq.js';
 import { regionsRows } from './regionsview.js';
+import {
+  buildGetContactByKey, parseContactReply, needsPathOverride, buildOverrideFrame,
+  buildRestoreFrame, encodePendingRestore, decodePendingRestore, RESP_CODE_OK, RESP_CODE_ERR,
+  RESTORE_STORAGE_KEY,
+} from './contactpath.js';
 
 // Region discovery needs FIRMWARE_VER_CODE >= 13 (companion_radio/MyMesh.cpp,
 // CMD_SEND_ANON_REQ's non-contact allowance) to address a repeater it hasn't
@@ -58,6 +63,10 @@ const state = {
   regions: {
     candidates: new Map(), answered: new Map(), demoted: new Set(), cursor: 0,
     round: 0, pending: null, supported: false,
+    // overridePending: { target, raw, timer } while a saved contact's out_path is
+    // temporarily forced to zero-hop for the ask currently in flight (see
+    // prepareAndAskRegions / finishOverrideRound below). null the rest of the time.
+    overridePending: null,
     // answers: accepted replies, oldest first, for the Home "declared scopes" panel
     // (src/regionsview.js does the last-5/most-recent-first transform). Each entry
     // is { target, regions, truncated, at, name }; name is filled in lazily once
@@ -204,7 +213,134 @@ function maybeQueryRegions() {
   // ack (captured below) fills it in — a reply must never be attributed on the
   // sole evidence that a request happens to be pending.
   r.pending = { target, advertTs, tag: null };
+  prepareAndAskRegions(target, frame);
+}
+
+// --- Contact-path override (src/contactpath.js has the frame layout + decision) ---
+// A target this app wants to ask may already be a saved contact whose stored
+// out_path is not the zero-hop link node-discover just confirmed — sendAnonReq
+// then floods or source-routes over a stale path, and a flooded/misrouted ask gets
+// no reply (repeaters require a direct route from the CURRENT neighbour). Force the
+// contact to zero-hop before asking, then always restore it, whether the ask
+// succeeded, failed outright (still flooded), or simply timed out with no reply.
+const GET_CONTACT_TIMEOUT_MS = 4000;
+const CONTACT_WRITE_TIMEOUT_MS = 4000;
+// Upper bound on how long a contact is held zero-hop for one ask. The repeater's own
+// est_timeout (returned in the send-ack but otherwise unused here) is normally
+// shorter, but nothing tells us a reply is NEVER coming — this is the backstop that
+// guarantees restoreContact still runs even if the round never resolves any other way.
+const OVERRIDE_ROUND_TIMEOUT_MS = 20000;
+
+// getContact reads one contact by pubkey. Resolves parseContactReply's result, or
+// null on a timeout/send failure — callers treat null the same as "not a contact":
+// skip the override and ask as-is, since that is exactly today's (broken-for-
+// contacts) behaviour and never worse than not asking at all. The ERR_CODE_NOT_FOUND
+// reply carries no pubkey to match against (see src/contactpath.js), so a found
+// reply is matched by its own echoed pub_key field; nothing else in this app issues
+// CMD_GET_CONTACT_BY_KEY concurrently (transport.js serialises writes and this is
+// the only per-target BLE flow), so an unmatched not-found reply arriving in this
+// window can only be the answer to THIS request.
+function getContact(pubkeyHex) {
+  if (!state.transport) return Promise.resolve(null); // disconnected between scheduling and running this round
+  return new Promise((resolve) => {
+    const onFrame = (dv) => {
+      const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      const parsed = parseContactReply(bytes);
+      if (!parsed) return;
+      if (parsed.found && bytesToHex(parsed.raw.slice(1, 33)) !== pubkeyHex) return; // some other contact's reply
+      cleanup();
+      resolve(parsed);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      dbg('regions: contact lookup timed out for ' + pubkeyHex.slice(0, 12) + '… — asking without the path check', 'no');
+      resolve(null);
+    }, GET_CONTACT_TIMEOUT_MS);
+    function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onFrame); }
+    state.transport.onFrame(onFrame);
+    state.transport.send(buildGetContactByKey(pubkeyHex)).catch((e) => { cleanup(); dbg('regions: contact lookup failed: ' + e.message, 'no'); resolve(null); });
+  });
+}
+
+// writeContact sends a CMD_ADD_UPDATE_CONTACT frame (override or restore) and waits
+// for its RESP_CODE_OK/RESP_CODE_ERR reply. Like getContact, this reply carries no
+// correlator — same "only one in-flight BLE command of this kind" argument applies.
+function writeContact(frame, timeoutMs) {
+  if (!state.transport) return Promise.resolve(false); // disconnected mid-round — see getContact
+  return new Promise((resolve) => {
+    const onFrame = (dv) => {
+      const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      if (bytes[0] !== RESP_CODE_OK && bytes[0] !== RESP_CODE_ERR) return;
+      cleanup();
+      resolve(bytes[0] === RESP_CODE_OK);
+    };
+    const timer = setTimeout(() => { cleanup(); resolve(false); }, timeoutMs);
+    function cleanup() { clearTimeout(timer); if (state.transport) state.transport.offFrame(onFrame); }
+    state.transport.onFrame(onFrame);
+    state.transport.send(frame).catch(() => { cleanup(); resolve(false); });
+  });
+}
+
+// finishOverrideRound restores a temporarily-overridden contact exactly once per
+// round — called from every place a round can conclude (accepted reply, an ack that
+// still reports FLOOD despite the override, or the OVERRIDE_ROUND_TIMEOUT_MS
+// backstop) so a race between two of those can never double-restore.
+function finishOverrideRound(target) {
+  const ov = state.regions.overridePending;
+  if (!ov || ov.target !== target) return;
+  clearTimeout(ov.timer);
+  state.regions.overridePending = null;
+  restoreContact(target, ov.raw);
+}
+
+// restoreContact writes the ORIGINAL contact frame back. The localStorage
+// crash-safety record is cleared only once the restore actually acks — if it
+// doesn't, the record is left in place so the next connect to this same companion
+// replays it (see maybeReplayPendingRestore).
+async function restoreContact(target, raw) {
+  const ok = await writeContact(buildRestoreFrame(raw), CONTACT_WRITE_TIMEOUT_MS);
+  if (ok) {
+    clearPendingRestore(target);
+    dbg('regions: restored ' + target.slice(0, 12) + '…’s original path', 'st');
+  } else {
+    dbg('regions: restore write for ' + target.slice(0, 12) + '… did not ack — will retry on next connect', 'no');
+  }
+}
+
+function clearPendingRestore(target) {
+  const rec = decodePendingRestore(localStorage.getItem(RESTORE_STORAGE_KEY) || '');
+  if (rec && rec.self === state.companionPubkey && rec.target === target) localStorage.removeItem(RESTORE_STORAGE_KEY);
+}
+
+// prepareAndAskRegions runs the read/override dance (if this target needs one) and
+// then sends the regions request exactly as askRegions always has.
+async function prepareAndAskRegions(target, frame) {
+  const contact = await getContact(target);
+  if (!needsPathOverride(contact)) { askRegions(target, frame); return; }
+  const raw = contact.raw;
+  localStorage.setItem(RESTORE_STORAGE_KEY, encodePendingRestore(state.companionPubkey, target, raw));
+  const ok = await writeContact(buildOverrideFrame(raw), CONTACT_WRITE_TIMEOUT_MS);
+  if (!ok) dbg('regions: path override for ' + target.slice(0, 12) + '… did not ack — asking anyway', 'no');
+  const timer = setTimeout(() => finishOverrideRound(target), OVERRIDE_ROUND_TIMEOUT_MS);
+  state.regions.overridePending = { target, raw, timer };
   askRegions(target, frame);
+}
+
+// maybeReplayPendingRestore runs once per connect, before any region-discovery ask:
+// if a previous session died between an override write and its restore, the target
+// contact is still sitting zero-hop on the companion. Replayed only against the SAME
+// companion the record was made for (keyed on self pubkey from SELF_INFO) — never a
+// different one, which may have an unrelated contact under that pubkey.
+async function maybeReplayPendingRestore() {
+  const stored = localStorage.getItem(RESTORE_STORAGE_KEY);
+  if (!stored) return;
+  const rec = decodePendingRestore(stored);
+  if (!rec) { localStorage.removeItem(RESTORE_STORAGE_KEY); return; } // corrupt — nothing safe to replay
+  if (rec.self !== state.companionPubkey) return; // belongs to a different companion — leave it for its own connect
+  dbg('regions: replaying a pending contact-path restore for ' + rec.target.slice(0, 12) + '… left over from a previous session', 'st');
+  const ok = await writeContact(buildRestoreFrame(rec.raw), CONTACT_WRITE_TIMEOUT_MS);
+  if (ok) { localStorage.removeItem(RESTORE_STORAGE_KEY); dbg('regions: pending restore replayed OK', 'ok'); }
+  else dbg('regions: pending restore did not ack — will retry next connect', 'no');
 }
 
 // askRegions sends the request and listens for the immediate RESP_CODE_SENT ack to
@@ -227,7 +363,16 @@ function askRegions(target, frame) {
       // and say so — otherwise this looks identical to a repeater in range that
       // simply has not answered yet.
       state.regions.pending = null;
-      dbg('regions: ' + target.slice(0, 12) + '… asked over FLOOD — repeaters only answer DIRECT, no reply will come', 'no');
+      const overridden = state.regions.overridePending && state.regions.overridePending.target === target;
+      if (overridden) {
+        // We just forced this contact's out_path to zero-hop and it STILL came
+        // back flood — the override assumption was wrong (or didn't take). Say so
+        // plainly rather than letting it look like the ordinary not-a-contact case.
+        dbg('regions: ' + target.slice(0, 12) + '… still asked over FLOOD after the zero-hop override — override had no effect', 'no');
+        finishOverrideRound(target);
+      } else {
+        dbg('regions: ' + target.slice(0, 12) + '… asked over FLOOD — repeaters only answer DIRECT, no reply will come', 'no');
+      }
       return;
     }
     state.regions.pending.tag = ack.tag;
@@ -275,6 +420,7 @@ function onRegionsFrame(dv) {
   state.regions.pending = null;
   state.regions.demoted.delete(result.target); // it answered — no longer a non-answerer
   state.regions.answered.set(result.target, result.advertTs);
+  finishOverrideRound(result.target); // no-op unless this round overrode the contact's path
   noteRegionsAnswer(result.target, result.regions, result.truncated);
   const fix = currentFix();
   state.queue.add({
@@ -635,6 +781,7 @@ async function connectAll() {
     s2.className = '';
     els('companionInfo').textContent = (info.name ? info.name + ' · ' : '') + state.companionPubkey.slice(0, 20) + '…';
     dbg('SELF_INFO → ' + (info.name || '(unnamed)') + ' ' + state.companionPubkey);
+    await maybeReplayPendingRestore(); // fix up any contact left zero-hop by a crash/BLE-drop last session, before anything else touches it
 
     // Ensure the companion adverts with 2-byte path hashes — 1-byte mode produces
     // collision-prone IDs that our capture rule rejects, so the contribution is useless.
@@ -807,6 +954,10 @@ async function disconnectAll(keepProgress) {
   clearInterval(state.tick); state.tick = null;
   stopRfSampler();
   state.regions.pending = null; // no more frames will arrive on this transport to answer it
+  // A contact left zero-hop here is exactly what the localStorage crash-safety record
+  // covers — leave it in place (do NOT restore over a transport that's gone, and do NOT
+  // clear the record) so maybeReplayPendingRestore fixes it on the next connect.
+  if (state.regions.overridePending) { clearTimeout(state.regions.overridePending.timer); state.regions.overridePending = null; }
   els('discStatus').textContent = '';
   if (state.wakeLock) state.wakeLock.disable(); // let the screen sleep again
   if (state.publisher) { state.publisher.end(); state.publisher = null; }
