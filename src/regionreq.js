@@ -16,6 +16,9 @@ const TRUNCATION_WARN_BYTES = 160;
 
 export function buildRegionsRequest(pubkeyHex) {
   const pk = pubkeyHex.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(pk)) {
+    throw new TypeError(`buildRegionsRequest: pubkeyHex must be exactly 64 hex characters, got: ${pubkeyHex}`);
+  }
   const out = new Uint8Array(1 + 32 + 2);
   out[0] = CMD_SEND_ANON_REQ;
   for (let i = 0; i < 32; i++) out[1 + i] = parseInt(pk.substr(i * 2, 2), 16);

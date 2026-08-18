@@ -15,6 +15,23 @@ test('buildRegionsRequest is [57][pubkey 32][0x01][0x00] — no app timestamp', 
   assert.equal(f[34], 0x00, 'reply_path_len = 0 for a zero-hop reply');
 });
 
+test('buildRegionsRequest throws on a too-short pubkey', () => {
+  assert.throws(() => buildRegionsRequest('aa'.repeat(31)), TypeError);
+});
+
+test('buildRegionsRequest throws on a too-long pubkey', () => {
+  assert.throws(() => buildRegionsRequest('aa'.repeat(33)), TypeError);
+});
+
+test('buildRegionsRequest throws on non-hex characters', () => {
+  assert.throws(() => buildRegionsRequest('zz'.repeat(32)), TypeError);
+});
+
+test('buildRegionsRequest accepts an uppercase pubkey and lowercases it', () => {
+  const f = buildRegionsRequest(PK.toUpperCase());
+  assert.deepEqual(Array.from(f.slice(1, 33)), new Array(32).fill(0xaa));
+});
+
 test('parseRegionsResponse reads tag, clock and the CSV', () => {
   // [0x8C][reserved][tag 4][repeater_clock 4][CSV]
   const bytes = new Uint8Array([0x8c, 0, ...le32(0x11223344), ...le32(1755518096), ...ascii('*,be,be-vlg,be-van')]);
