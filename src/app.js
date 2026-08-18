@@ -9,7 +9,7 @@
 // and diagnostics live on the Settings tab.
 import { WebBluetoothTransport } from './transport.js';
 import { parseFrame, PUSH_CODE_LOG_RX_DATA } from './frames.js';
-import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute } from './meshpacket.js';
+import { parsePacket, deriveHeardKey, bytesToHex, isFloodRoute, ADV_TYPE_REPEATER } from './meshpacket.js';
 import { requestSelfInfo, requestDeviceInfo, setPathHashMode } from './selfinfo.js';
 import { resolveName } from './names.js';
 import { upsertHeard, sameNode, addNodeKey } from './recent.js';
@@ -28,6 +28,12 @@ import { Publisher } from './publisher.js';
 import { loadConfig, getConfig } from './config.js';
 import { buildRfLogRecord } from './capture.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
+import { buildRegionsRequest, parseRegionsResponse, selectNextTarget } from './regionreq.js';
+
+// Region discovery needs FIRMWARE_VER_CODE >= 13 (companion_radio/MyMesh.cpp,
+// CMD_SEND_ANON_REQ's non-contact allowance) to address a repeater it hasn't
+// already got as a saved contact — which is the normal case out on a drive.
+const REGION_DISCOVERY_MIN_FW = 13;
 
 const els = (id) => document.getElementById(id);
 const state = {
@@ -43,6 +49,15 @@ const state = {
   lastHeardAt: null, lastFireAt: 0, tick: null,
   // RF environment sampler
   rfTimer: null, lastRfSample: null, rfGen: 0,
+  // Region discovery (ANON_REQ_TYPE_REGIONS) — round-robin scheduler state, ridden
+  // on the discover clock at half rate. candidates/answered/demoted/cursor feed
+  // selectNextTarget (src/regionreq.js) directly; round counts discover sweeps so
+  // every SECOND one queries a repeater; pending holds the one outstanding request
+  // this app ever has in flight; supported reflects the FIRMWARE_VER_CODE gate.
+  regions: {
+    candidates: new Map(), answered: new Map(), demoted: new Set(), cursor: 0,
+    round: 0, pending: null, supported: false,
+  },
 };
 
 const RECENT_MAX = 20;
@@ -151,6 +166,51 @@ function fireDiscover(now) {
   state.lastFireAt = now;
 }
 
+// --- Region discovery (outbound: what does a repeater CLAIM to forward?) ---
+// The ONLY part of this app that transmits addressed to one specific node, so it
+// rides the discover clock at half rate — one repeater asked per SECOND sweep —
+// never a fan-out over candidates. selectNextTarget (src/regionreq.js) is the pure
+// round-robin/demotion decision; this is wiring: call it, and if (and only if) it
+// names a target, send exactly one buildRegionsRequest.
+function maybeQueryRegions() {
+  if (!state.transport) return;
+  const r = state.regions;
+  r.round++;
+  if (r.round % 2 !== 0) return; // half rate: every second discover sweep only
+  const cfg = getConfig();
+  if (!cfg || !cfg.regionDiscovery || !r.supported) return;
+  const candidates = Array.from(r.candidates, ([pubkey, advertTs]) => ({ pubkey, advertTs }));
+  const target = selectNextTarget({ candidates, answered: r.answered, demoted: r.demoted, cursor: r.cursor });
+  if (!target) return; // nothing worth asking this round — do not transmit
+  const advertTs = r.candidates.get(target);
+  r.cursor++;
+  r.demoted.add(target); // demoted until it answers — silence must never look like "declared nothing"
+  r.pending = { target, advertTs };
+  state.transport.send(buildRegionsRequest(target)).catch((e) => dbg('regions request failed: ' + e.message, 'no'));
+  dbg('regions → asked ' + target.slice(0, 12) + '… for its declared list', 'tx');
+}
+
+// onRegionsFrame is a dedicated BLE frame listener for ANON_REQ_TYPE_REGIONS replies.
+// parseRegionsResponse checks bytes[0] itself — it must see the RAW notification,
+// never parseFrame(...).data (parseFrame strips the leading code byte, which would
+// silently misfire this check and discard every reply with no error anywhere).
+function onRegionsFrame(dv) {
+  const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  const r = parseRegionsResponse(bytes);
+  if (!r || !state.regions.pending) return;
+  const { target, advertTs } = state.regions.pending;
+  state.regions.pending = null;
+  state.regions.demoted.delete(target); // it answered — no longer a non-answerer
+  state.regions.answered.set(target, advertTs);
+  const fix = currentFix();
+  state.queue.add({
+    kind: 'regions', at: new Date().toISOString(), target,
+    regions: r.regions, truncated: r.truncated, repeater_clock: r.repeaterClock,
+    lat: fix ? fix.lat : null, lon: fix ? fix.lon : null, acc_m: fix ? fix.acc_m : null,
+  });
+  dbg('regions ← ' + target.slice(0, 12) + '… declares: ' + (r.regions.join(',') || '(none)'), 'ok');
+}
+
 function renderDiscoverStatus(dec) {
   const el = els('discStatus');
   if (!state.connected || dec.state === 'paused') { el.textContent = ''; return; }
@@ -179,7 +239,7 @@ function setPaused(paused) {
 function monitorTick() {
   const now = Date.now();
   const dec = discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused);
-  if (dec.fire) { fireDiscover(now); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused)); }
+  if (dec.fire) { fireDiscover(now); maybeQueryRegions(); renderDiscoverStatus(discoverDecision(now, state.lastHeardAt, state.lastFireAt, state.paused)); }
   else renderDiscoverStatus(dec);
   state.snrPeakPct = decayPeak(state.snrPeakPct, state.snrBarPct, 1000);
   renderSnrMeter();
@@ -332,6 +392,16 @@ async function processFrame(dv) {
   // in an active area — back off discover so we don't poll on top of live traffic.
   if (isOrganicHeard(hk)) state.lastHeardAt = Date.now();
 
+  // Region-discovery candidates: only a 0-hop advert (hk.src === 'advert') carries the
+  // full pubkey ANON_REQ_TYPE_REGIONS needs to address, and only ADV_TYPE_REPEATER
+  // firmware implements the reply (simple_repeater/MyMesh.cpp) — a chat/room/sensor
+  // node would just be a request that can never be answered. advertTs tracks the
+  // node's own re-advert clock so selectNextTarget re-asks after a config edit.
+  const regionsCfg = getConfig();
+  if (regionsCfg && regionsCfg.regionDiscovery && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
+    state.regions.candidates.set(hk.heardKey, pkt.advertTs);
+  }
+
   noteHeard(hk.heardKey, hk.heardKeyLen, f.snr, f.rssi, hk.src); // show in the list even without a GPS fix
   state.rxTotal++;
   state.rxTimes.push(Date.now());
@@ -432,6 +502,7 @@ async function connectAll() {
   try {
     state.transport = new WebBluetoothTransport();
     state.transport.onFrame(processFrame);
+    state.transport.onFrame(onRegionsFrame); // no-op unless a region request is in flight
     state.transport.onStatus((s) => {
       dbg('BLE: ' + s);
       if (state.connected) log(s === 'connected' ? 'capturing' : 'BLE ' + s + '…');
@@ -460,6 +531,18 @@ async function connectAll() {
       } else {
         els('hashinfo').textContent = 'Path-hash mode: ' + (di.pathHashMode + 1) + '-byte ✓';
         dbg('path-hash mode already ' + di.pathHashMode + ' (' + (di.pathHashMode + 1) + '-byte)');
+      }
+      // Region discovery needs FIRMWARE_VER_CODE >= 13 to address a repeater that
+      // isn't already a saved contact (CMD_SEND_ANON_REQ, companion_radio/MyMesh.cpp).
+      // di.fwVer IS that byte (RESP_CODE_DEVICE_INFO offset 1). Off by default in
+      // config; when on but the firmware is too old, leave it off and say why —
+      // no silent failure.
+      state.regions.supported = di.fwVer >= REGION_DISCOVERY_MIN_FW;
+      const regionsCfg = getConfig();
+      if (regionsCfg && regionsCfg.regionDiscovery && !state.regions.supported) {
+        els('regionsInfo').textContent = 'Region discovery: off — firmware v' + di.fwVer + ' (needs v' + REGION_DISCOVERY_MIN_FW + '+)';
+        els('regionsInfo').style.display = '';
+        dbg('region discovery disabled: firmware v' + di.fwVer + ' < ' + REGION_DISCOVERY_MIN_FW, 'no');
       }
     } catch (e) { dbg('hash-mode check skipped: ' + e.message); }
 
@@ -583,6 +666,7 @@ async function disconnectAll(keepProgress) {
   renderPauseChip();
   clearInterval(state.tick); state.tick = null;
   stopRfSampler();
+  state.regions.pending = null; // no more frames will arrive on this transport to answer it
   els('discStatus').textContent = '';
   if (state.wakeLock) state.wakeLock.disable(); // let the screen sleep again
   if (state.publisher) { state.publisher.end(); state.publisher = null; }
@@ -602,6 +686,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     await loadConfig();
     els('fullRfLogInfo').style.display = getConfig().fullRfLog ? '' : 'none';
     els('rfSamplerInfo').style.display = getConfig().rfSampler ? '' : 'none';
+    if (getConfig().regionDiscovery) {
+      els('regionsInfo').textContent = 'Region discovery: on';
+      els('regionsInfo').style.display = '';
+    }
   } catch (e) {
     log('Config error: ' + e.message + ' — copy config.example.json to config.json and fill it in.');
   }

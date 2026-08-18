@@ -27,6 +27,20 @@ export function buildRegionsRequest(pubkeyHex) {
   return out;
 }
 
+// selectNextTarget picks the next repeater to ask, or null when there is nothing
+// worth asking. Fresh candidates come first; a repeater that has never answered is
+// DEMOTED rather than dropped, because silence is ambiguous — out of direct range,
+// rate-limited, firmware too old, or busy — so dropping loses a node that was merely
+// out of range for one stretch, while retrying at equal priority lets a permanent
+// non-answerer starve one that would answer.
+export function selectNextTarget(state) {
+  const due = (c) => state.answered.get(c.pubkey) !== c.advertTs;
+  const fresh = state.candidates.filter((c) => due(c) && !state.demoted.has(c.pubkey));
+  const pool = fresh.length ? fresh : state.candidates.filter(due);
+  if (!pool.length) return null;
+  return pool[state.cursor % pool.length].pubkey;
+}
+
 export function parseRegionsResponse(bytes) {
   if (!bytes || bytes.length < 10 || bytes[0] !== PUSH_CODE_BINARY_RESPONSE) return null;
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRegionsRequest, parseRegionsResponse, CMD_SEND_ANON_REQ } from '../src/regionreq.js';
+import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, CMD_SEND_ANON_REQ } from '../src/regionreq.js';
 
 const PK = 'aa'.repeat(32);
 const le32 = (v) => [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff];
@@ -58,4 +58,37 @@ test('parseRegionsResponse rejects a wrong code and a short frame', () => {
 test('an empty CSV yields an empty list, not null', () => {
   const bytes = new Uint8Array([0x8c, 0, ...le32(1), ...le32(2)]);
   assert.deepEqual(parseRegionsResponse(bytes).regions, []);
+});
+
+const cand = (pk, ts) => ({ pubkey: pk, advertTs: ts });
+
+test('picks an unasked repeater', () => {
+  const s = { candidates: [cand('a', 1), cand('b', 1)], answered: new Map(), demoted: new Set(), cursor: 0 };
+  assert.equal(selectNextTarget(s), 'a');
+});
+
+test('skips one that already answered with the same advert timestamp', () => {
+  const s = { candidates: [cand('a', 1), cand('b', 1)], answered: new Map([['a', 1]]), demoted: new Set(), cursor: 0 };
+  assert.equal(selectNextTarget(s), 'b');
+});
+
+test('re-asks when the advert timestamp changed — the config may have been edited', () => {
+  const s = { candidates: [cand('a', 2)], answered: new Map([['a', 1]]), demoted: new Set(), cursor: 0 };
+  assert.equal(selectNextTarget(s), 'a');
+});
+
+test('returns null when every candidate is satisfied', () => {
+  const s = { candidates: [cand('a', 1)], answered: new Map([['a', 1]]), demoted: new Set(), cursor: 0 };
+  assert.equal(selectNextTarget(s), null);
+});
+
+test('a demoted non-answerer is only chosen once no fresh candidate remains', () => {
+  const s = { candidates: [cand('a', 1), cand('b', 1)], answered: new Map(), demoted: new Set(['a']), cursor: 0 };
+  assert.equal(selectNextTarget(s), 'b', 'fresh candidate wins');
+  const only = { candidates: [cand('a', 1)], answered: new Map(), demoted: new Set(['a']), cursor: 0 };
+  assert.equal(selectNextTarget(only), 'a', 'demoted is still retried when it is all we have');
+});
+
+test('no candidates yields null rather than throwing', () => {
+  assert.equal(selectNextTarget({ candidates: [], answered: new Map(), demoted: new Set(), cursor: 0 }), null);
 });
