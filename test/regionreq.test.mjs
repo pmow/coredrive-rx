@@ -314,3 +314,30 @@ test('an evaluation that asks nobody must not consume the airtime budget', () =>
   assert.equal(heardAskEligible(A, null, r, t0 + 19_000), false,
     'but 19s after a real ask the budget is genuinely spent');
 });
+
+test('AES block padding is trimmed — it must not land inside the last region name', () => {
+  // The reply is encrypted with a block cipher, so the plaintext arrives NUL-padded
+  // to a 16-byte boundary. Production carried this into storage in 48 of 65 rows:
+  // "belml" became "belml\0\0\0…", which matches no observed scope and reads as a
+  // region the repeater declares but never forwards — a false finding, every time.
+  const csv = 'be,be-vli,belml';
+  const padded = new Uint8Array([
+    0x8c, 0, ...le32(1), ...le32(2), ...ascii(csv), 0, 0, 0, 0, 0, 0, 0, 0,
+  ]);
+  const r = parseRegionsResponse(padded);
+  assert.deepEqual(r.regions, ['be', 'be-vli', 'belml'],
+    'the last name must not carry NUL bytes');
+  assert.equal(r.regions[2].length, 5, 'no trailing NULs survive into the name');
+});
+
+test('a wildcard-only reply survives padding as exactly "*"', () => {
+  // 0x2A followed by seven NULs is one full AES block; this is the shape that made
+  // regions_csv = '*' compare false in SQL and could mask the wildcard entirely.
+  const padded = new Uint8Array([0x8c, 0, ...le32(1), ...le32(2), 0x2a, 0, 0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(parseRegionsResponse(padded).regions, ['*']);
+});
+
+test('a reply that is only padding yields no regions, not one empty name', () => {
+  const padded = new Uint8Array([0x8c, 0, ...le32(1), ...le32(2), 0, 0, 0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(parseRegionsResponse(padded).regions, []);
+});
