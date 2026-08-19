@@ -66,7 +66,7 @@ const state = {
     // attempts/lastAskedAt drive the per-target retry backoff (see selectNextTarget):
     // a repeater that never answers must not be re-asked every single round.
     attempts: new Map(), lastAskedAt: new Map(),
-    lastAskAt: null, pending: null, supported: false,
+    lastAskAt: null, lastEvalAt: null, pending: null, supported: false,
     // overridePending: { target, raw, timer } while a saved contact's out_path is
     // temporarily forced to zero-hop for the ask currently in flight (see
     // prepareAndAskRegions / finishOverrideRound below). null the rest of the time.
@@ -202,16 +202,26 @@ function maybeQueryRegions() {
   const r = state.regions;
   const cfg = getConfig();
   if (!cfg || !cfg.regionDiscovery || !r.supported) return;
-  // Stamp the clock for this evaluation whatever the outcome. The tick asks
-  // regionDiscoverDue every second, so returning without stamping would re-enter
-  // (and re-log "no candidate") once a second instead of once a minute.
-  r.lastAskAt = Date.now();
+  // lastEvalAt throttles THIS path's re-entry (and its log line) to once a
+  // minute; lastAskAt is the airtime budget and is stamped only by commitAndAsk,
+  // when something is actually transmitted. Stamping the budget here spent it on
+  // evaluations that sent nothing, which then blocked the heard-packet path —
+  // observed in the field as a repeater heard at :27 and not asked until :09 of
+  // the next minute, by which time a moving receiver is long past it.
+  r.lastEvalAt = Date.now();
   const candidates = Array.from(r.candidates, ([pubkey, advertTs]) => ({ pubkey, advertTs }));
   const target = selectNextTarget({
     candidates, answered: r.answered, demoted: r.demoted, cursor: r.cursor,
     attempts: r.attempts, lastAskedAt: r.lastAskedAt, now: Date.now(),
   });
-  if (!target) { dbg('regions: due this round but no candidate to ask yet', 'st'); return; } // nothing worth asking this round — do not transmit
+  if (!target) {
+    // Silence here has two very different causes and they must not read alike.
+    const why = r.candidates.size === 0
+      ? 'no repeater heard yet'
+      : 'every repeater heard so far has already answered';
+    dbg('regions: nothing to ask — ' + why, 'st');
+    return; // do not transmit
+  }
   commitAndAsk(target, r.candidates.get(target));
 }
 
@@ -507,7 +517,7 @@ function monitorTick() {
   else renderDiscoverStatus(dec);
   // Region discovery runs on its own clock and is NOT gated on dec.fire, so the
   // stationary pause cannot silence it — see regionDiscoverDue in monitor.js.
-  if (regionDiscoverDue(now, state.regions.lastAskAt)) maybeQueryRegions();
+  if (regionDiscoverDue(now, state.regions.lastEvalAt)) maybeQueryRegions();
   state.snrPeakPct = decayPeak(state.snrPeakPct, state.snrBarPct, 1000);
   renderSnrMeter();
   state.rxTimes = pruneTimestamps(state.rxTimes, now);

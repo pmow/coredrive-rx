@@ -295,3 +295,22 @@ test('heardAskEligible: an ask already pending blocks a heard target regardless 
   const r = { pending: { target: B, advertTs: 1, tag: null }, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
   assert.equal(heardAskEligible(A, 1, r, 1_000_000), false);
 });
+
+test('an evaluation that asks nobody must not consume the airtime budget', () => {
+  // Field regression: the timer path stamped lastAskAt on EVERY evaluation, so a
+  // minute in which nothing was asked still spent the budget. A repeater heard
+  // 19s later was then blocked, and the ask slipped to the next minute — exactly
+  // the delay the heard-driven path exists to remove. The budget must count
+  // transmissions, not evaluations.
+  const t0 = 1_000_000;
+  const r = {
+    pending: null, lastAskAt: null, // nothing has ever been SENT
+    answered: new Map(), attempts: new Map(), lastAskedAt: new Map(),
+  };
+  assert.equal(heardAskEligible(A, null, r, t0 + 19_000), true,
+    'a repeater heard 19s after a no-op evaluation is still eligible');
+
+  r.lastAskAt = t0; // now something was actually sent
+  assert.equal(heardAskEligible(A, null, r, t0 + 19_000), false,
+    'but 19s after a real ask the budget is genuinely spent');
+});
