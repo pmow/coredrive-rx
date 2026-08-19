@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildRegionsRequest, parseRegionsResponse, selectNextTarget, CMD_SEND_ANON_REQ,
-  parseSentAck, RESP_CODE_SENT, applyRegionsReply, TRUNCATION_WARN_BYTES,
+  parseSentAck, RESP_CODE_SENT, applyRegionsReply, TRUNCATION_WARN_BYTES, retryBackoffFor,
 } from '../src/regionreq.js';
 
 const PK = 'aa'.repeat(32);
@@ -202,4 +202,46 @@ test('parseSentAck reports the route the companion actually used', () => {
   assert.equal(parseSentAck(direct).isFlood, false, 'a direct send can be answered');
   assert.equal(parseSentAck(flood).isFlood, true, 'a flooded send will be silently ignored by the repeater');
   assert.equal(parseSentAck(flood).tag, 0xaabbccdd, 'the tag is still read on the flood path');
+});
+
+// --- Retry backoff (field bug: nine asks to one silent node in nine minutes) ---
+
+const A = 'aa'.repeat(32), B = 'bb'.repeat(32);
+
+test('a silent target is NOT re-asked every round once every other candidate has answered', () => {
+  // Exactly the field case: B answered so it is no longer due; A never answered and
+  // is demoted. The demoted-fallback pool then contained only A, handing it back
+  // every single round. The backoff must break that.
+  const answered = new Map([[B, null]]);
+  const state = {
+    candidates: [cand(A, null), cand(B, null)], answered, demoted: new Set([A]), cursor: 0,
+    attempts: new Map([[A, 1]]), lastAskedAt: new Map([[A, 1_000_000]]),
+    now: 1_000_000 + 60_000, // one minute later, the old cadence
+  };
+  assert.equal(selectNextTarget(state), null, 'one minute after a failed ask, A is still backed off');
+});
+
+test('a silent target IS retried once its backoff has elapsed — silence stays ambiguous', () => {
+  const state = {
+    candidates: [cand(A, null), cand(B, null)], answered: new Map([[B, null]]), demoted: new Set([A]), cursor: 0,
+    attempts: new Map([[A, 1]]), lastAskedAt: new Map([[A, 1_000_000]]),
+    now: 1_000_000 + retryBackoffFor(1),
+  };
+  assert.equal(selectNextTarget(state), A, 'dropping a node forever would lose one that was merely out of range');
+});
+
+test('backoff lengthens with each failed attempt and then holds', () => {
+  assert.equal(retryBackoffFor(0), 0, 'a never-asked target is immediately eligible');
+  assert.ok(retryBackoffFor(2) > retryBackoffFor(1));
+  assert.ok(retryBackoffFor(3) > retryBackoffFor(2));
+  assert.equal(retryBackoffFor(9), retryBackoffFor(3), 'the last step repeats rather than growing without bound');
+});
+
+test('a fresh candidate is preferred over a backed-off one', () => {
+  const state = {
+    candidates: [cand(A, null), cand(B, null)], answered: new Map(), demoted: new Set([A]), cursor: 0,
+    attempts: new Map([[A, 1]]), lastAskedAt: new Map([[A, 1_000_000]]),
+    now: 1_000_000 + 60_000,
+  };
+  assert.equal(selectNextTarget(state), B);
 });

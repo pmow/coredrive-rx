@@ -63,6 +63,9 @@ const state = {
   // this app ever has in flight; supported reflects the FIRMWARE_VER_CODE gate.
   regions: {
     candidates: new Map(), answered: new Map(), demoted: new Set(), cursor: 0,
+    // attempts/lastAskedAt drive the per-target retry backoff (see selectNextTarget):
+    // a repeater that never answers must not be re-asked every single round.
+    attempts: new Map(), lastAskedAt: new Map(),
     lastAskAt: null, pending: null, supported: false,
     // overridePending: { target, raw, timer } while a saved contact's out_path is
     // temporarily forced to zero-hop for the ask currently in flight (see
@@ -201,7 +204,10 @@ function maybeQueryRegions() {
   // (and re-log "no candidate") once a second instead of once a minute.
   r.lastAskAt = Date.now();
   const candidates = Array.from(r.candidates, ([pubkey, advertTs]) => ({ pubkey, advertTs }));
-  const target = selectNextTarget({ candidates, answered: r.answered, demoted: r.demoted, cursor: r.cursor });
+  const target = selectNextTarget({
+    candidates, answered: r.answered, demoted: r.demoted, cursor: r.cursor,
+    attempts: r.attempts, lastAskedAt: r.lastAskedAt, now: Date.now(),
+  });
   if (!target) { dbg('regions: due this round but no candidate to ask yet', 'st'); return; } // nothing worth asking this round — do not transmit
   const advertTs = r.candidates.get(target);
   // Build the frame BEFORE committing any scheduler state: buildRegionsRequest
@@ -210,6 +216,8 @@ function maybeQueryRegions() {
   // monitorTick and skip the rest of that tick's work.
   const frame = buildRegionsRequest(target);
   r.cursor++;
+  r.attempts.set(target, (r.attempts.get(target) ?? 0) + 1);
+  r.lastAskedAt.set(target, Date.now());
   r.demoted.add(target); // demoted until it answers — silence must never look like "declared nothing"
   // tag starts null: the reply-matcher (applyRegionsReply) treats a null tag as
   // "not yet confirmed" and refuses to accept ANY reply until the RESP_CODE_SENT

@@ -43,8 +43,38 @@ export function buildRegionsRequest(pubkeyHex) {
 // rate-limited, firmware too old, or busy — so dropping loses a node that was merely
 // out of range for one stretch, while retrying at equal priority lets a permanent
 // non-answerer starve one that would answer.
+// RETRY_BACKOFF_MS: how long a target that did not answer must wait before it may
+// be asked again, indexed by how many times it has already been asked this session.
+// The last entry repeats for every further attempt.
+//
+// Demotion alone was not enough. It moves a silent target behind the answering
+// ones, but once every OTHER candidate has answered they are no longer due, the
+// pool falls back to "every due candidate", and the silent one is handed back
+// every single round — observed in the field as nine asks to one node in nine
+// minutes. That is not just wasted airtime: simple_repeater rate-limits anon
+// requests to 4 per 180s SHARED across all types and all requesters, so hammering
+// a node makes it LESS likely to ever answer, not more.
+export const RETRY_BACKOFF_MS = [0, 5 * 60000, 15 * 60000, 30 * 60000];
+
+export function retryBackoffFor(attempts) {
+  if (attempts <= 0) return 0;
+  return RETRY_BACKOFF_MS[Math.min(attempts, RETRY_BACKOFF_MS.length - 1)];
+}
+
+// selectNextTarget picks the next repeater to ask, or null when nothing is worth
+// asking right now. `now` and the attempts/lastAskedAt maps are passed in so the
+// decision stays pure and testable.
 export function selectNextTarget(state) {
-  const due = (c) => state.answered.get(c.pubkey) !== c.advertTs;
+  const now = state.now ?? 0;
+  const attempts = state.attempts ?? new Map();
+  const lastAskedAt = state.lastAskedAt ?? new Map();
+  const answered = (c) => state.answered.get(c.pubkey) === c.advertTs;
+  const backedOff = (c) => {
+    const last = lastAskedAt.get(c.pubkey);
+    if (last == null) return false;
+    return now - last < retryBackoffFor(attempts.get(c.pubkey) ?? 0);
+  };
+  const due = (c) => !answered(c) && !backedOff(c);
   const fresh = state.candidates.filter((c) => due(c) && !state.demoted.has(c.pubkey));
   const pool = fresh.length ? fresh : state.candidates.filter(due);
   if (!pool.length) return null;
