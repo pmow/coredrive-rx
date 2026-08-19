@@ -29,7 +29,7 @@ import { Publisher } from './publisher.js';
 import { loadConfig, getConfig } from './config.js';
 import { buildRfLogRecord } from './capture.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
-import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply } from './regionreq.js';
+import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply, heardAskEligible } from './regionreq.js';
 import { regionsRows } from './regionsview.js';
 import {
   buildGetContactByKey, parseContactReply, needsPathOverride, buildOverrideFrame,
@@ -187,11 +187,14 @@ function fireDiscover(now) {
 }
 
 // --- Region discovery (outbound: what does a repeater CLAIM to forward?) ---
-// The ONLY part of this app that transmits addressed to one specific node, so it
-// rides the discover clock at half rate — one repeater asked per SECOND sweep —
-// never a fan-out over candidates. selectNextTarget (src/regionreq.js) is the pure
-// round-robin/demotion decision; this is wiring: call it, and if (and only if) it
-// names a target, send exactly one buildRegionsRequest.
+// The ONLY part of this app that transmits addressed to one specific node. Asking
+// only works zero-hop DIRECT, and this receiver is moving — a repeater picked a
+// minute later by a clock may already be out of range — so the ask is primarily
+// event-driven: maybeAskHeardTarget fires it the moment a suitable repeater is
+// actually heard (see the heard-packet handler below). maybeQueryRegions is the
+// timer fallback for a candidate heard once and never heard again. Both share the
+// SAME one-ask-per-60s budget (state.regions.lastAskAt) and the same per-target
+// backoff, so which path fires never changes the airtime spent — only the timing.
 const REGION_SENT_ACK_TIMEOUT_MS = 4000;
 
 function maybeQueryRegions() {
@@ -209,11 +212,41 @@ function maybeQueryRegions() {
     attempts: r.attempts, lastAskedAt: r.lastAskedAt, now: Date.now(),
   });
   if (!target) { dbg('regions: due this round but no candidate to ask yet', 'st'); return; } // nothing worth asking this round — do not transmit
-  const advertTs = r.candidates.get(target);
+  commitAndAsk(target, r.candidates.get(target));
+}
+
+// maybeAskHeardTarget is the event-driven counterpart to maybeQueryRegions: called
+// right after a repeater is recorded as a region-discovery candidate from a heard
+// packet, it asks THAT repeater immediately if the shared budget/backoff allow it,
+// instead of waiting for whichever candidate the next timer tick happens to pick.
+// This is normally what fires the ask in practice — the timer above stays wired as
+// the fallback for a candidate heard once and never heard again (see monitorTick).
+// heardAskEligible (src/regionreq.js) is the pure decision; this is just wiring.
+function maybeAskHeardTarget(target, advertTs) {
+  if (!state.transport) return;
+  const r = state.regions;
+  const cfg = getConfig();
+  if (!cfg || !cfg.regionDiscovery || !r.supported) return;
+  const now = Date.now();
+  if (!heardAskEligible(target, advertTs, r, now)) return;
+  // Consume the shared budget here, same as the timer path — both paths stamp the
+  // SAME clock (r.lastAskAt) so the one-ask-per-60s ceiling holds no matter which
+  // path actually fires.
+  r.lastAskAt = now;
+  dbg('regions: heard ' + target.slice(0, 12) + '… directly — asking now', 'st');
+  commitAndAsk(target, advertTs);
+}
+
+// commitAndAsk mutates the scheduler state for one ask and sends it. Shared by both
+// the timer path and the heard-packet path so a request committed either way looks
+// identical to everything downstream (the ack listener, the reply matcher, restore).
+function commitAndAsk(target, advertTs) {
+  const r = state.regions;
   // Build the frame BEFORE committing any scheduler state: buildRegionsRequest
   // throws on a malformed pubkey, and a throw here must not leave cursor/demoted/
-  // pending mutated for a request that was never sent — that would escape
-  // monitorTick and skip the rest of that tick's work.
+  // pending mutated for a request that was never sent — that would escape its
+  // caller (monitorTick or the heard-packet handler) and skip the rest of that
+  // handler's work.
   const frame = buildRegionsRequest(target);
   r.cursor++;
   r.attempts.set(target, (r.attempts.get(target) ?? 0) + 1);
@@ -666,6 +699,7 @@ async function processFrame(dv) {
   const regionsCfg = getConfig();
   if (regionsCfg && regionsCfg.regionDiscovery && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
     state.regions.candidates.set(hk.heardKey, pkt.advertTs);
+    maybeAskHeardTarget(hk.heardKey, pkt.advertTs);
   }
   // Discover responses are the common case (47h advert intervals mean real adverts are
   // rare) but carry only an 8-byte pubkey prefix in practice — resolve to the full
@@ -675,7 +709,11 @@ async function processFrame(dv) {
   // then asks it once per session and re-asks automatically if a real advert with a
   // timestamp later arrives. Async and non-blocking — a failed resolve just adds nothing.
   if (regionsCfg && regionsCfg.regionDiscovery && hk.src === 'discover' && pkt.discoverType === ADV_TYPE_REPEATER) {
-    resolvePubkey(hk.heardKey).then((pk) => { if (pk) state.regions.candidates.set(pk, null); });
+    resolvePubkey(hk.heardKey).then((pk) => {
+      if (!pk) return;
+      state.regions.candidates.set(pk, null);
+      maybeAskHeardTarget(pk, null);
+    });
   }
 
   noteHeard(hk.heardKey, hk.heardKeyLen, f.snr, f.rssi, hk.src); // show in the list even without a GPS fix

@@ -4,6 +4,8 @@
 // NOTE: the app sends NO timestamp. sendAnonReq (BaseChatMesh.cpp) prepends a
 // 4-byte tag itself from getCurrentTimeUnique(), which the repeater echoes back.
 
+import { regionDiscoverDue } from './monitor.js';
+
 export const CMD_SEND_ANON_REQ = 57;
 export const PUSH_CODE_BINARY_RESPONSE = 0x8c;
 export const ANON_REQ_TYPE_REGIONS = 0x01;
@@ -61,6 +63,18 @@ export function retryBackoffFor(attempts) {
   return RETRY_BACKOFF_MS[Math.min(attempts, RETRY_BACKOFF_MS.length - 1)];
 }
 
+// isTargetDue is the per-target half of "worth asking": not already answered (at
+// this advert timestamp) and not sitting inside its retry backoff. Shared by
+// selectNextTarget (the periodic pool scan) and heardAskEligible (the event-driven
+// ask for one specific just-heard target) so the two paths can never disagree about
+// whether a given target may be asked.
+export function isTargetDue(target, advertTs, answered, attempts, lastAskedAt, now) {
+  if (answered.get(target) === advertTs) return false;
+  const last = lastAskedAt.get(target);
+  if (last == null) return true;
+  return now - last >= retryBackoffFor(attempts.get(target) ?? 0);
+}
+
 // selectNextTarget picks the next repeater to ask, or null when nothing is worth
 // asking right now. `now` and the attempts/lastAskedAt maps are passed in so the
 // decision stays pure and testable.
@@ -68,17 +82,30 @@ export function selectNextTarget(state) {
   const now = state.now ?? 0;
   const attempts = state.attempts ?? new Map();
   const lastAskedAt = state.lastAskedAt ?? new Map();
-  const answered = (c) => state.answered.get(c.pubkey) === c.advertTs;
-  const backedOff = (c) => {
-    const last = lastAskedAt.get(c.pubkey);
-    if (last == null) return false;
-    return now - last < retryBackoffFor(attempts.get(c.pubkey) ?? 0);
-  };
-  const due = (c) => !answered(c) && !backedOff(c);
+  const due = (c) => isTargetDue(c.pubkey, c.advertTs, state.answered, attempts, lastAskedAt, now);
   const fresh = state.candidates.filter((c) => due(c) && !state.demoted.has(c.pubkey));
   const pool = fresh.length ? fresh : state.candidates.filter(due);
   if (!pool.length) return null;
   return pool[state.cursor % pool.length].pubkey;
+}
+
+// heardAskEligible is the event-driven twin of selectNextTarget: given a repeater
+// that was JUST heard directly, decide whether it may be asked right now instead of
+// waiting for the next timer tick. `r` is the same regions-state shape app.js keeps
+// (pending, lastAskAt, answered, attempts, lastAskedAt) — no DOM, no transport.
+//
+// Deliberately NOT here: any notion of `demoted`/fresh-pool priority. That machinery
+// exists in selectNextTarget to pick fairly AMONG MANY due candidates on a timer.
+// Here there is nothing to pick from — the target is already decided by physics (it's
+// the one whose radio we can currently hear), so which repeaters get asked and in
+// what order now falls out of which ones are actually in range at each moment, and
+// the retry backoff already stops one silent node from monopolising the shared
+// budget. Layering demotion on top would be a second fairness mechanism solving a
+// problem this event ordering already solves.
+export function heardAskEligible(target, advertTs, r, now) {
+  if (r.pending) return false;
+  if (!regionDiscoverDue(now, r.lastAskAt)) return false;
+  return isTargetDue(target, advertTs, r.answered, r.attempts, r.lastAskedAt, now);
 }
 
 export function parseRegionsResponse(bytes) {

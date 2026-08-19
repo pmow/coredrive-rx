@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   buildRegionsRequest, parseRegionsResponse, selectNextTarget, CMD_SEND_ANON_REQ,
   parseSentAck, RESP_CODE_SENT, applyRegionsReply, TRUNCATION_WARN_BYTES, retryBackoffFor,
+  isTargetDue, heardAskEligible,
 } from '../src/regionreq.js';
+import { REGION_INTERVAL_MS } from '../src/monitor.js';
 
 const PK = 'aa'.repeat(32);
 const le32 = (v) => [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff];
@@ -244,4 +246,52 @@ test('a fresh candidate is preferred over a backed-off one', () => {
     now: 1_000_000 + 60_000,
   };
   assert.equal(selectNextTarget(state), B);
+});
+
+// --- Event-driven ask on a heard packet (fires the moment a repeater is in range,
+// instead of waiting for whichever candidate the next 60s timer tick happens to
+// pick — see maybeAskHeardTarget in src/app.js) ---
+
+test('isTargetDue: never asked and never answered is due', () => {
+  assert.equal(isTargetDue(A, 1, new Map(), new Map(), new Map(), 1_000_000), true);
+});
+
+test('isTargetDue: answered at the same advert timestamp is not due', () => {
+  assert.equal(isTargetDue(A, 1, new Map([[A, 1]]), new Map(), new Map(), 1_000_000), false);
+});
+
+test('isTargetDue: inside the per-target backoff is not due', () => {
+  const attempts = new Map([[A, 1]]);
+  const lastAskedAt = new Map([[A, 1_000_000]]);
+  assert.equal(isTargetDue(A, null, new Map(), attempts, lastAskedAt, 1_000_000 + 60_000), false, 'still inside the 5-min backoff');
+  assert.equal(isTargetDue(A, null, new Map(), attempts, lastAskedAt, 1_000_000 + retryBackoffFor(1)), true, 'due once the backoff elapses');
+});
+
+test('heardAskEligible: a due repeater heard within budget is eligible', () => {
+  const r = { pending: null, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
+  assert.equal(heardAskEligible(A, 1, r, 1_000_000), true);
+});
+
+test('heardAskEligible: a second repeater heard 5s later is NOT eligible — the 60s budget is shared', () => {
+  const r = { pending: null, lastAskAt: 1_000_000, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
+  assert.equal(heardAskEligible(B, 1, r, 1_000_000 + 5000), false);
+  assert.equal(heardAskEligible(B, 1, r, 1_000_000 + REGION_INTERVAL_MS), true, 'eligible again once the budget clock elapses');
+});
+
+test('heardAskEligible: a repeater inside its per-target backoff is NOT eligible even with budget free', () => {
+  const r = {
+    pending: null, lastAskAt: null, answered: new Map(),
+    attempts: new Map([[A, 1]]), lastAskedAt: new Map([[A, 1_000_000]]),
+  };
+  assert.equal(heardAskEligible(A, null, r, 1_000_000 + 60_000), false);
+});
+
+test('heardAskEligible: an already-answered repeater is NOT eligible', () => {
+  const r = { pending: null, lastAskAt: null, answered: new Map([[A, 1]]), attempts: new Map(), lastAskedAt: new Map() };
+  assert.equal(heardAskEligible(A, 1, r, 1_000_000), false);
+});
+
+test('heardAskEligible: an ask already pending blocks a heard target regardless of budget/backoff', () => {
+  const r = { pending: { target: B, advertTs: 1, tag: null }, lastAskAt: null, answered: new Map(), attempts: new Map(), lastAskedAt: new Map() };
+  assert.equal(heardAskEligible(A, 1, r, 1_000_000), false);
 });
