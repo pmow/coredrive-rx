@@ -704,8 +704,17 @@ async function processFrame(dv) {
   // Region-discovery candidates: only a 0-hop advert (hk.src === 'advert') carries the
   // full pubkey ANON_REQ_TYPE_REGIONS needs to address, and only ADV_TYPE_REPEATER
   // firmware implements the reply (simple_repeater/MyMesh.cpp) — a chat/room/sensor
-  // node would just be a request that can never be answered. advertTs tracks the
-  // node's own re-advert clock so selectNextTarget re-asks after a config edit.
+  // node would just be a request that can never be answered.
+  //
+  // advertTs is stored ONLY as the answered-key, which makes the policy "ask each
+  // repeater once per session". It does NOT signal a config change: Mesh.cpp:418
+  // sets it to getCurrentTime() on every advert, so it moves every advert interval
+  // (47h in this network) whether or not anything changed. The firmware DOES track
+  // a real config-change signal — _prefs.discovery_mod_timestamp, set on `regions
+  // save` (CommonCLI.cpp:1037) and filterable via the discover request's optional
+  // `since` field (simple_repeater/MyMesh.cpp:791-798) — but asking once per drive
+  // is deliberate: it costs ~19 requests against the ~180 the discover sweep already
+  // sends, and it keeps every stored list demonstrably current instead of assumed.
   const regionsCfg = getConfig();
   if (regionsCfg && regionsCfg.regionDiscovery && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
     state.regions.candidates.set(hk.heardKey, pkt.advertTs);
