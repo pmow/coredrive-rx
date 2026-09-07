@@ -31,16 +31,14 @@ import { buildRfLogRecord } from './capture.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
 import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply, heardAskEligible } from './regionreq.js';
 import { regionsRows } from './regionsview.js';
+import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader, REGION_DISCOVERY_MIN_FW } from './uplink.js';
 import {
   buildGetContactByKey, parseContactReply, needsPathOverride, buildOverrideFrame,
   buildRestoreFrame, encodePendingRestore, decodePendingRestore, RESP_CODE_OK, RESP_CODE_ERR,
   RESTORE_STORAGE_KEY,
 } from './contactpath.js';
 
-// Region discovery needs FIRMWARE_VER_CODE >= 13 (companion_radio/MyMesh.cpp,
-// CMD_SEND_ANON_REQ's non-contact allowance) to address a repeater it hasn't
-// already got as a saved contact — which is the normal case out on a drive.
-const REGION_DISCOVERY_MIN_FW = 13;
+const LOG_LINE_CAP = 200; // dbg ring buffer; stated in the exported log header
 
 const els = (id) => document.getElementById(id);
 const state = {
@@ -51,6 +49,10 @@ const state = {
   // monitor counters / state
   rxTotal: 0, rfLogged: 0, nodeKeys: [], hexCells: new Set(), rxTimes: [],
   lastUploadAt: null, brokerState: 'offline',
+  // Diagnostics carried into the exported log header (src/uplink.js): a startup
+  // dbg line rolls out of the 200-line buffer within minutes, a header cannot.
+  fwVer: null, uplink: 'no-config', lastUplinkLogged: null, lastRegionInertLogged: null,
+  pendingCount: 0, lastConfigTryAt: null,
   lastHeard: null, snrBarPct: 0, snrPeakPct: 0,
   // auto-discover
   lastHeardAt: null, lastFireAt: 0, tick: null,
@@ -145,7 +147,7 @@ function dbg(msg, level) {
   line.className = level === 'ok' ? 'lg-ok' : level === 'no' ? 'lg-no' : level === 'tx' ? 'lg-tx' : 'lg-st';
   line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
   el.insertBefore(line, el.firstChild);
-  while (el.childNodes.length > 200) el.removeChild(el.lastChild);
+  while (el.childNodes.length > LOG_LINE_CAP) el.removeChild(el.lastChild);
 }
 
 // switchView cycles between Home (monitor), the full-screen Map, and Settings via the
@@ -201,14 +203,20 @@ function maybeQueryRegions() {
   if (!state.transport) return;
   const r = state.regions;
   const cfg = getConfig();
-  if (!cfg || !cfg.regionDiscovery || !r.supported) return;
   // lastEvalAt throttles THIS path's re-entry (and its log line) to once a
   // minute; lastAskAt is the airtime budget and is stamped only by commitAndAsk,
   // when something is actually transmitted. Stamping the budget here spent it on
   // evaluations that sent nothing, which then blocked the heard-packet path —
   // observed in the field as a repeater heard at :27 and not asked until :09 of
   // the next minute, by which time a moving receiver is long past it.
+  //
+  // Stamped BEFORE the feature gates: with the feature off it stayed null, so
+  // regionDiscoverDue returned true on every one-second tick and this function was
+  // re-entered 60x more often when disabled than when enabled.
   r.lastEvalAt = Date.now();
+  // noteRegionInert says which gate is holding this, exactly once — the four
+  // reasons were previously indistinguishable from an empty candidate pool.
+  if (!cfg || !cfg.regionDiscovery || !r.supported) { noteRegionInert(); return; }
   const candidates = Array.from(r.candidates, ([pubkey, advertTs]) => ({ pubkey, advertTs }));
   const target = selectNextTarget({
     candidates, answered: r.answered, demoted: r.demoted, cursor: r.cursor,
@@ -507,6 +515,97 @@ function setPaused(paused) {
   dbg(paused ? 'stationary — capture/upload paused' : 'moving again — capture/upload resumed', paused ? 'no' : 'ok');
 }
 
+// --- Uplink health + config recovery (pure decisions in src/uplink.js) ---
+// A degraded uplink used to be visible NOWHERE: the progress list said "All
+// connected", the Home screen said nothing, and the only evidence was an absence
+// of 'published …' lines. Everything below exists to make it a named, on-screen,
+// logged state.
+
+// currentUplink names the state of the config → publisher → broker chain.
+function currentUplink() {
+  return uplinkState({ hasConfig: !!getConfig(), hasPublisher: !!state.publisher, brokerState: state.brokerState });
+}
+
+// renderUplinkChip keeps an unhealthy uplink permanently on screen, and logs each
+// TRANSITION once — a per-tick line would flood the 200-line buffer and push out
+// exactly the history needed to diagnose it.
+function renderUplinkChip() {
+  state.uplink = currentUplink();
+  const warn = uplinkWarning(state.uplink, state.connected);
+  const el = els('uplinkchip');
+  if (warn) { el.textContent = warn; el.style.display = 'block'; } else { el.style.display = 'none'; }
+  if (state.uplink !== state.lastUplinkLogged) {
+    if (state.lastUplinkLogged !== null) dbg('uplink → ' + state.uplink, state.uplink === 'ok' ? 'ok' : 'no');
+    state.lastUplinkLogged = state.uplink;
+  }
+}
+
+// applyConfigToSettings reflects the EFFECTIVE config on the Settings screen. Called
+// at startup, after a successful retry, and after the firmware check, so a late
+// config never leaves the screen describing one that failed to arrive. It is the
+// single writer of regionsInfo — two writers previously disagreed.
+function applyConfigToSettings() {
+  const cfg = getConfig();
+  els('fullRfLogInfo').style.display = cfg && cfg.fullRfLog ? '' : 'none';
+  els('rfSamplerInfo').style.display = cfg && cfg.rfSampler ? '' : 'none';
+  els('regionsInfo').style.display = cfg && cfg.regionDiscovery ? '' : 'none';
+  if (!(cfg && cfg.regionDiscovery)) return;
+  // Before the firmware is read, `supported` is still false and fwVer unknown —
+  // reporting it "off" there would be a verdict on no evidence.
+  if (state.fwVer == null && !state.connected) { els('regionsInfo').textContent = 'Region discovery: on (firmware checked on connect)'; return; }
+  const why = regionInertReason({ config: cfg, supported: state.regions.supported, fwVer: state.fwVer });
+  els('regionsInfo').textContent = why ? 'Region discovery: off — ' + why : 'Region discovery: on';
+}
+
+// noteRegionInert says ONCE, in the debug log, whether region discovery can
+// transmit — and if not, which of the four gates is holding it. "No regions lines
+// in the log" was previously consistent with all four and distinguished none.
+function noteRegionInert() {
+  const why = regionInertReason({ config: getConfig(), supported: state.regions.supported, fwVer: state.fwVer });
+  const key = why ?? 'active';
+  if (key === state.lastRegionInertLogged) return;
+  state.lastRegionInertLogged = key;
+  dbg(why ? 'regions: inert — ' + why : 'regions: active — will ask repeaters as they are heard', why ? 'no' : 'ok');
+}
+
+// startPublisher builds the MQTT publisher from the loaded config and connects it.
+// Split out of connectAll so a config that only arrives on a LATER retry can bring
+// uploading up on its own, without the user reconnecting the companion.
+async function startPublisher() {
+  if (state.publisher) return true;
+  const cfg = getConfig();
+  if (!cfg || !cfg.mqttUrl) return false;
+  state.publisher = new Publisher({ url: cfg.mqttUrl, username: cfg.mqttUsername, password: cfg.mqttPassword, clientId: state.companionPubkey });
+  state.publisher.onStatus(onBrokerStatus);
+  await state.publisher.connect();
+  state.brokerState = 'connect';
+  renderBroker();
+  renderUplinkChip();
+  return true;
+}
+
+// retryConfig re-attempts the single fetch whose one failure used to sink an entire
+// session: no publisher was built, and fullRfLog / rfSampler / regionDiscovery all
+// read false. Safe to call repeatedly — loadConfig dedupes concurrent attempts and
+// caches only on success.
+async function retryConfig() {
+  if (getConfig()) return true;
+  try {
+    await loadConfig();
+  } catch (e) {
+    return false;
+  }
+  dbg('config.json loaded on retry — uploading and feature flags are live now', 'ok');
+  applyConfigToSettings();
+  noteRegionInert();
+  if (state.connected) {
+    try { await startPublisher(); } catch (e) { dbg('broker connect after config retry failed: ' + e.message, 'no'); }
+    startRfSampler(); // returns immediately if the flag is off; was skipped when config was missing at connect
+  }
+  renderUplinkChip();
+  return true;
+}
+
 // --- Per-second monitor tick: drives auto-discover, the SNR-meter decay, and the
 // time-relative labels (last-heard / last-upload / rate / discover countdown). Runs only
 // while connected.
@@ -518,6 +617,13 @@ function monitorTick() {
   // Region discovery runs on its own clock and is NOT gated on dec.fire, so the
   // stationary pause cannot silence it — see regionDiscoverDue in monitor.js.
   if (regionDiscoverDue(now, state.regions.lastEvalAt)) maybeQueryRegions();
+  // A session that started without config must be able to heal without a restart:
+  // retry once a minute (not per tick) for as long as it is missing.
+  if (!getConfig() && (state.lastConfigTryAt == null || now - state.lastConfigTryAt >= 60000)) {
+    state.lastConfigTryAt = now;
+    retryConfig();
+  }
+  renderUplinkChip();
   state.snrPeakPct = decayPeak(state.snrPeakPct, state.snrBarPct, 1000);
   renderSnrMeter();
   state.rxTimes = pruneTimestamps(state.rxTimes, now);
@@ -547,7 +653,8 @@ async function renderStatusStrip() {
   const now = Date.now();
   const fix = currentFix();
   els('sGps').textContent = fix ? '✓ ' + Math.round(fix.acc_m) + 'm' : '… no fix';
-  els('sPending').textContent = (await state.queue.count()) + ' pending';
+  state.pendingCount = await state.queue.count(); // also stamped into the exported log header
+  els('sPending').textContent = state.pendingCount + ' pending';
   els('sRate').textContent = state.rxTimes.length + ' pkt/min';
   const dot = els('uDot');
   const color = !state.publisher ? '#9aa4b2'
@@ -804,24 +911,36 @@ async function drainLoop() {
   }
 }
 
-// pushNow is the Settings button: force a drain, or force a reconnect first if the link
-// is down — so a stuck disconnected client with a full queue has a manual way to recover.
+// pushNow is the Settings button: the manual recovery path for a client sitting on a
+// backlog. It reports queue depth SEPARATELY from link health and picks the repair
+// that matches the actual fault (pushOutcome in src/uplink.js decides both).
+//
+// What it replaces: a single 'nothing pending / not connected' line that could not
+// tell a healthy empty queue from a dead uplink holding hundreds of records — and a
+// reconnect branch guarded on `state.publisher && !connected()`, which SKIPPED the
+// one case that most needed recovery: no publisher at all (null), where it then
+// reported "nothing pending" no matter how deep the queue was.
 async function pushNow() {
   const b = els('btnPush');
   b.disabled = true;
   try {
-    if (state.publisher && !state.publisher.connected()) {
-      dbg('CoreScope not connected — forcing reconnect…', 'st');
-      state.publisher.reconnect(); // drain fires automatically on the 'connect' event
-      return;
+    const pending = await state.queue.count();
+    const uplink = currentUplink();
+    const published = uplink === 'ok' ? await drain() : 0;
+    const outcome = pushOutcome({ uplink, pending, published });
+    dbg(outcome.message, outcome.level);
+    if (outcome.reloadConfig) {
+      if (await retryConfig()) await drain(); // config arrived — flush immediately
+    } else if (outcome.reconnect) {
+      if (state.publisher) state.publisher.reconnect(); // drain fires on the 'connect' event
+      else if (state.connected) await startPublisher();
     }
-    const n = await drain();
-    dbg(n ? 'pushed ' + n + ' record(s)' : 'nothing pending / not connected', n ? 'ok' : 'st');
   } catch (e) {
     dbg('push failed (kept buffered): ' + e.message, 'no');
   } finally {
     b.disabled = false;
     refreshCounters();
+    renderUplinkChip();
   }
 }
 
@@ -880,29 +999,18 @@ async function connectAll() {
       // no silent failure. Both branches write the Settings line: reconnecting to a
       // v13+ device after a v12 one must not leave a stale "off — firmware v12" on
       // screen while the feature is actually live.
+      state.fwVer = di.fwVer;
       state.regions.supported = di.fwVer >= REGION_DISCOVERY_MIN_FW;
-      const regionsCfg = getConfig();
-      if (regionsCfg && regionsCfg.regionDiscovery) {
-        if (state.regions.supported) {
-          els('regionsInfo').textContent = 'Region discovery: on';
-        } else {
-          els('regionsInfo').textContent = 'Region discovery: off — firmware v' + di.fwVer + ' (needs v' + REGION_DISCOVERY_MIN_FW + '+)';
-          dbg('region discovery disabled: firmware v' + di.fwVer + ' < ' + REGION_DISCOVERY_MIN_FW, 'no');
-        }
-        els('regionsInfo').style.display = '';
-      }
     } catch (e) {
+      // requestDeviceInfo threw or timed out — supported stays false and fwVer stays
+      // null, and applyConfigToSettings/noteRegionInert below both report that as the
+      // reason rather than leaving an enabled-looking feature that never transmits.
       dbg('hash-mode check skipped: ' + e.message);
-      // requestDeviceInfo threw or timed out — state.regions.supported is still the
-      // false it was reset to above, but the "on" line written at DOMContentLoaded
-      // from config alone is still on screen. Without this, the user sees an enabled
-      // feature that will never transmit and is never told why.
-      const regionsCfg = getConfig();
-      if (regionsCfg && regionsCfg.regionDiscovery) {
-        els('regionsInfo').textContent = 'Region discovery: off — could not read firmware version';
-        els('regionsInfo').style.display = '';
-      }
     }
+    // One writer for the Settings line and one for the log, both fed by the same
+    // pure regionInertReason — the two former writers could disagree.
+    applyConfigToSettings();
+    noteRegionInert();
 
     state.gps.start((fix) => {
       if (state.localMap) state.localMap.setPosition(fix.lat, fix.lon);
@@ -911,26 +1019,29 @@ async function connectAll() {
     });
 
     const s3 = step('③ Connecting to CoreScope…', 'pending');
-    const cfg = getConfig();
-    if (cfg && cfg.mqttUrl) {
-      state.publisher = new Publisher({ url: cfg.mqttUrl, username: cfg.mqttUsername, password: cfg.mqttPassword, clientId: state.companionPubkey });
-      state.publisher.onStatus(onBrokerStatus);
-      await state.publisher.connect();
-      state.brokerState = 'connect';
-      renderBroker();
+    // One more attempt at the fetch whose single startup failure used to sink the
+    // entire session. Connecting is a deliberate user action with the radio up, so
+    // it is the best moment to retry.
+    await retryConfig();
+    const uploading = await startPublisher();
+    if (uploading) {
       s3.textContent = '③ CoreScope connected ✓';
       s3.className = '';
     } else {
-      s3.textContent = '③ MQTT not configured (config.json)';
+      s3.textContent = '③ NOT uploading — config.json not loaded; needs internet once (retrying)';
       s3.className = 'err';
     }
 
-    step('✅ All connected — capturing');
+    // Never claim an uplink we do not have. This line read "✅ All connected —
+    // capturing" through an entire session that published nothing at all.
+    if (uploading) step('✅ All connected — capturing');
+    else step('⚠️ Capturing + buffering — NOT uploading', 'err');
     state.connected = true;
     setButton();
     state.lastFireAt = 0; // fire a discover sweep immediately on the first tick
     state.tick = setInterval(monitorTick, 1000);
     startRfSampler();
+    renderUplinkChip();
     log('capturing as ' + (info.name || state.companionPubkey.slice(0, 12)));
     switchView('home'); // connected → jump to the live monitor
 
@@ -1044,17 +1155,27 @@ async function disconnectAll(keepProgress) {
 
 window.addEventListener('DOMContentLoaded', async () => {
   els('appver').textContent = 'v' + VERSION;
+  // First line of every session names the build. The exported log also carries it in
+  // a header (buildLogHeader) because this line rolls out of the 200-line buffer
+  // within minutes — two field logs arrived with no way to tell which version wrote
+  // them, which sent a diagnosis down the wrong path entirely.
+  dbg('CoreDrive RX v' + VERSION + ' started', 'st');
   try {
     await loadConfig();
-    els('fullRfLogInfo').style.display = getConfig().fullRfLog ? '' : 'none';
-    els('rfSamplerInfo').style.display = getConfig().rfSampler ? '' : 'none';
-    if (getConfig().regionDiscovery) {
-      els('regionsInfo').textContent = 'Region discovery: on';
-      els('regionsInfo').style.display = '';
-    }
+    applyConfigToSettings();
   } catch (e) {
-    log('Config error: ' + e.message + ' — copy config.example.json to config.json and fill it in.');
+    // Loud on THREE surfaces. This failure previously wrote one line to els('status'),
+    // which connectAll then cleared with log('') — so the most consequential startup
+    // fault in the app was invisible in the very log people share to report it.
+    dbg('config.json failed to load: ' + e.message, 'no');
+    // config.json is deliberately never served from the offline cache, so starting
+    // the app needs a live connection ONCE. Say that here rather than leaving the
+    // user to infer it: capture and buffering are unaffected, only uploading waits.
+    dbg('the app needs an internet connection at startup to fetch config.json — capture and buffering still work, uploading waits; retrying every minute and as soon as the network returns', 'no');
+    log('Config error: ' + e.message + ' — needs internet to load settings; retrying automatically.');
+    applyConfigToSettings();
   }
+  renderUplinkChip();
   setButton();
   state.wakeLock = createWakeLock();
   // Audio cue (#7): default off, but remember the choice across app starts.
@@ -1078,8 +1199,27 @@ window.addEventListener('DOMContentLoaded', async () => {
   });
   els('btnPush').addEventListener('click', pushNow);
   els('btnShareLog').addEventListener('click', async () => {
-    const text = Array.from(els('log').childNodes).map((n) => n.textContent).join('\n');
-    try { await shareLog(text || '(empty log)'); } catch (e) { dbg('share failed: ' + e.message, 'no'); }
+    const lines = Array.from(els('log').childNodes).map((n) => n.textContent);
+    // Built HERE, at share time, so it can never roll out of the ring buffer the way
+    // a logged startup line does. It carries everything a reader of a shared log
+    // needs and previously had to guess: app version, the EFFECTIVE config flags
+    // (which is how a stale cached config becomes visible), firmware version, whether
+    // region discovery can transmit at all, uplink state and queue depth.
+    const header = buildLogHeader({
+      version: VERSION,
+      nowISO: new Date().toISOString(),
+      config: getConfig(),
+      fwVer: state.fwVer,
+      regionsSupported: state.regions.supported,
+      companionName: state.companionName,
+      companionPubkey: state.companionPubkey,
+      uplink: currentUplink(),
+      pending: state.pendingCount,
+      lineCount: lines.length,
+      lineCap: LOG_LINE_CAP,
+    });
+    const text = header + (lines.join('\n') || '(empty log)');
+    try { await shareLog(text); } catch (e) { dbg('share failed: ' + e.message, 'no'); }
   });
   els('btnDbg').addEventListener('click', () => {
     const logEl = els('log');
@@ -1097,9 +1237,13 @@ window.addEventListener('DOMContentLoaded', async () => {
   els('tabMap').addEventListener('click', () => switchView('map'));
   els('tabSettings').addEventListener('click', () => switchView('settings'));
   switchView(state.connected ? 'home' : 'settings'); // land on Settings (where Connect lives) until connected
-  // Network came back (e.g. cellular→WiFi handoff) — kick a drain so backlog flushes
-  // without waiting for the 5 s loop.
-  window.addEventListener('online', () => { drain().then(refreshCounters).catch(() => {}); });
+  // Network came back (e.g. cellular→WiFi handoff, or the radio finally up after a
+  // cold start in a garage). Retry the config FIRST: this is the moment the fetch
+  // that failed at startup can finally succeed, and draining before it is pointless
+  // — with no config there is no publisher to drain into.
+  window.addEventListener('online', () => {
+    retryConfig().finally(() => { drain().then(refreshCounters).catch(() => {}); });
+  });
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }

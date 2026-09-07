@@ -92,6 +92,10 @@
     <div class="meterval" id="snrVal"></div>
   </div>
   <div id="pausechip" style="display:none;background:#3a2e10;color:#e6a23c;border:1px solid #6b5212;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px;font-weight:600"></div>
+  <!-- Uplink warning: shown continuously while receptions are being queued but not
+       uploaded. Red, not amber — the pause chip above is a normal condition, this
+       one is not. A degraded uplink used to be visible nowhere on this screen. -->
+  <div id="uplinkchip" style="display:none;background:#3a1414;color:#ff8a80;border:1px solid #6b1212;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px;font-weight:600"></div>
   <div class="card">
     <label>Recently heard nodes (latest SNR)</label>
     <div id="recent" class="recent"><div class="muted">— nothing yet —</div></div>

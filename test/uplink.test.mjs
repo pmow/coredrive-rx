@@ -1,0 +1,205 @@
+// Pure decisions about the uplink (config → publisher → broker → queue) and the
+// diagnostic header stamped onto an exported debug log.
+//
+// Every case here comes from a real field diagnosis that took far too long:
+//   - a session that captured for an hour and published nothing, while the UI
+//     said "All connected" and the Push button said "nothing pending";
+//   - a session running on a config cached before rfSampler/regionDiscovery
+//     existed, so both were silently off and looked broken;
+//   - two shared logs with no way to tell which app version produced them.
+import { test } from 'node:test';
+import assert from 'node:assert';
+import { uplinkState, uplinkWarning, pushOutcome, regionInertReason, buildLogHeader } from '../src/uplink.js';
+
+const CFG = { fullRfLog: true, rfSampler: true, regionDiscovery: true };
+
+// --- uplinkState -------------------------------------------------------------
+
+test('no config is its own state — it is the only one the app can fix by itself', () => {
+  assert.strictEqual(uplinkState({ hasConfig: false, hasPublisher: false, brokerState: null }), 'no-config');
+});
+
+test('config but no publisher is distinct from a publisher that is down', () => {
+  assert.strictEqual(uplinkState({ hasConfig: true, hasPublisher: false, brokerState: null }), 'no-publisher');
+  assert.strictEqual(uplinkState({ hasConfig: true, hasPublisher: true, brokerState: 'close' }), 'down');
+  assert.strictEqual(uplinkState({ hasConfig: true, hasPublisher: true, brokerState: 'offline' }), 'down');
+  assert.strictEqual(uplinkState({ hasConfig: true, hasPublisher: true, brokerState: 'connect' }), 'ok');
+});
+
+test('a missing config wins over everything else — it is the upstream cause', () => {
+  assert.strictEqual(uplinkState({ hasConfig: false, hasPublisher: true, brokerState: 'connect' }), 'no-config');
+});
+
+// --- uplinkWarning: the persistent on-screen banner --------------------------
+
+test('a healthy uplink shows no banner', () => {
+  assert.strictEqual(uplinkWarning('ok'), null);
+});
+
+test('every unhealthy state says records are KEPT, not lost', () => {
+  for (const s of ['no-config', 'no-publisher', 'down']) {
+    const w = uplinkWarning(s);
+    assert.ok(w, s + ' must warn');
+    assert.match(w, /not being uploaded/i, s + ' must say uploading is stopped');
+    assert.match(w, /kept/i, s + ' must reassure that nothing is lost');
+  }
+});
+
+test('the no-config banner names config.json so the cause is actionable', () => {
+  assert.match(uplinkWarning('no-config'), /config\.json/);
+});
+
+test('the no-config banner says internet is needed — config.json is never served offline', () => {
+  // config.json is deliberately excluded from the service-worker cache (a stale copy
+  // silently disables feature flags), so a cold start with no connection genuinely
+  // cannot upload. The user must be told that, not left guessing.
+  assert.match(uplinkWarning('no-config'), /internet/i);
+});
+
+test('before connecting, only a missing config warns — the rest is the normal resting state', () => {
+  // A cold open has no publisher and an offline broker by definition. Warning about
+  // that would put a red banner on screen every single launch, before anything is
+  // even being captured, which trains the user to ignore it.
+  assert.strictEqual(uplinkWarning('no-publisher', false), null);
+  assert.strictEqual(uplinkWarning('down', false), null);
+  assert.ok(uplinkWarning('no-config', false), 'a missing config is actionable before connecting too');
+});
+
+test('once connected, every unhealthy state warns again', () => {
+  for (const s of ['no-config', 'no-publisher', 'down']) assert.ok(uplinkWarning(s, true), s);
+});
+
+// --- pushOutcome: the "Push pending now" button ------------------------------
+
+test('an empty queue on a healthy link says exactly that — never "not connected"', () => {
+  // The old message was 'nothing pending / not connected', which conflated a
+  // healthy empty queue with a dead uplink and a null publisher.
+  const r = pushOutcome({ uplink: 'ok', pending: 0, published: 0 });
+  assert.match(r.message, /queue is empty/i);
+  assert.doesNotMatch(r.message, /not connected/i);
+  assert.strictEqual(r.level, 'st');
+});
+
+test('a successful push reports the count', () => {
+  const r = pushOutcome({ uplink: 'ok', pending: 3, published: 3 });
+  assert.match(r.message, /pushed 3 record/);
+  assert.strictEqual(r.level, 'ok');
+});
+
+test('a healthy link that published nothing while records are buffered is flagged, not hidden', () => {
+  const r = pushOutcome({ uplink: 'ok', pending: 7, published: 0 });
+  assert.match(r.message, /7 record/);
+  assert.strictEqual(r.level, 'no');
+});
+
+test('no publisher triggers a reconnect AND reports the real backlog', () => {
+  // The old code skipped its reconnect branch entirely when state.publisher was
+  // null — the exact case where recovery was needed — and reported 0 pending
+  // regardless of how many records were actually buffered.
+  const r = pushOutcome({ uplink: 'no-publisher', pending: 412, published: 0 });
+  assert.strictEqual(r.reconnect, true);
+  assert.match(r.message, /412/);
+});
+
+test('a down broker triggers a reconnect and never claims the queue is empty', () => {
+  const r = pushOutcome({ uplink: 'down', pending: 0, published: 0 });
+  assert.strictEqual(r.reconnect, true);
+  assert.doesNotMatch(r.message, /empty/i);
+});
+
+test('no config asks for a config reload, not a broker reconnect', () => {
+  const r = pushOutcome({ uplink: 'no-config', pending: 88, published: 0 });
+  assert.strictEqual(r.reloadConfig, true);
+  assert.strictEqual(r.reconnect, false);
+  assert.match(r.message, /88/);
+  assert.match(r.message, /config/i);
+  assert.match(r.message, /internet/i);
+});
+
+// --- regionInertReason: why the one transmitting feature never fires ---------
+
+test('region discovery off in config is named as such', () => {
+  const why = regionInertReason({ config: { ...CFG, regionDiscovery: false }, supported: false, fwVer: 13 });
+  assert.match(why, /config\.json/);
+});
+
+test('region discovery on but firmware too old names the firmware version', () => {
+  const why = regionInertReason({ config: CFG, supported: false, fwVer: 12 });
+  assert.match(why, /firmware/i);
+  assert.match(why, /12/);
+});
+
+test('region discovery on with unknown firmware says the device info was never read', () => {
+  const why = regionInertReason({ config: CFG, supported: false, fwVer: null });
+  assert.match(why, /firmware version/i);
+});
+
+test('a working region discovery has no reason to report', () => {
+  assert.strictEqual(regionInertReason({ config: CFG, supported: true, fwVer: 13 }), null);
+});
+
+test('no config at all is reported as the cause rather than blaming the firmware', () => {
+  assert.match(regionInertReason({ config: null, supported: false, fwVer: null }), /config/i);
+});
+
+// --- buildLogHeader: every shared log must identify itself --------------------
+
+const BASE = {
+  version: '1.11.0',
+  nowISO: '2026-09-07T09:12:33.000Z',
+  config: CFG,
+  fwVer: 13,
+  regionsSupported: true,
+  companionName: 'On8AR-Mobile',
+  companionPubkey: '3583b9257d077a416e73debdbefc3836',
+  uplink: 'ok',
+  pending: 0,
+  lineCount: 200,
+  lineCap: 200,
+};
+
+test('the header stamps the app version — without it a shared log is unidentifiable', () => {
+  assert.match(buildLogHeader(BASE), /v1\.11\.0/);
+});
+
+test('the header stamps when it was generated', () => {
+  assert.match(buildLogHeader(BASE), /2026-09-07T09:12:33/);
+});
+
+test('the header prints every effective config flag, which is how a stale config shows up', () => {
+  // A device on a config cached before these flags existed reports them off while
+  // the served config.json says on — invisible until the two are compared.
+  const h = buildLogHeader({ ...BASE, config: { fullRfLog: true, rfSampler: false, regionDiscovery: false } });
+  assert.match(h, /fullRfLog=on/);
+  assert.match(h, /rfSampler=off/);
+  assert.match(h, /regionDiscovery=off/);
+});
+
+test('a missing config is shouted, not printed as a flag list', () => {
+  const h = buildLogHeader({ ...BASE, config: null, uplink: 'no-config', pending: 412 });
+  assert.match(h, /NOT LOADED/);
+  assert.match(h, /412 pending/);
+});
+
+test('the header states whether region discovery can transmit at all, and why not', () => {
+  const ok = buildLogHeader(BASE);
+  assert.match(ok, /regions\s+active/);
+  const old = buildLogHeader({ ...BASE, fwVer: 12, regionsSupported: false });
+  assert.match(old, /regions\s+inert/);
+  assert.match(old, /12/);
+});
+
+test('the header records the firmware version', () => {
+  assert.match(buildLogHeader(BASE), /firmware\s+v13/);
+  assert.match(buildLogHeader({ ...BASE, fwVer: null, regionsSupported: false }), /firmware\s+unknown/);
+});
+
+test('a full ring buffer warns that older lines have already rolled out', () => {
+  assert.match(buildLogHeader(BASE), /rolled out/i);
+  assert.doesNotMatch(buildLogHeader({ ...BASE, lineCount: 42 }), /rolled out/i);
+});
+
+test('the header never leaks the broker password even if handed the whole config', () => {
+  const h = buildLogHeader({ ...BASE, config: { ...CFG, mqttPassword: 'sup3rs3cret', mqttUsername: 'u', mqttUrl: 'wss://b/ws' } });
+  assert.doesNotMatch(h, /sup3rs3cret/);
+});

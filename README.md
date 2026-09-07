@@ -132,6 +132,19 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
 
 Changing any value later is just a `config.json` edit + page refresh — no rebuild.
 
+> **`config.json` is never cached offline, so starting the app needs a live connection once.**
+> The service worker deliberately excludes it (both directions): a copy cached in an earlier
+> era silently disables every flag added since, because an absent flag normalizes to `false`.
+> That failure is invisible — it looks exactly like the feature being broken — whereas *no*
+> config is a state the app detects, warns about on the Home screen, and retries (every minute
+> and on the `online` event) until it loads. Capture and buffering are unaffected by a cold
+> start with no network; only uploading waits, and the queue drains as soon as config arrives.
+>
+> Because the effective flags are what matter, they are stamped into the header of every
+> exported debug log (**Share log** in Settings), together with the app version, the companion
+> firmware version, whether region discovery can transmit at all, and the queue depth. Compare
+> that header against the served `config.json` to spot a client running on something else.
+
 ### 6. CORS (optional, for node names)
 The app calls CoreScope's `GET /api/nodes/resolve?prefix=…` cross-origin. Set `resolveUrl` to either:
 - a **CORS-enabled reverse-proxy** location in front of the CoreScope API (adds
