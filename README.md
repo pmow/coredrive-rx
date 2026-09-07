@@ -100,27 +100,27 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
   "mqttUsername": "coredrive-rx",
   "mqttPassword": "<your publish-only EMQX account password>",
   "resolveUrl": "https://corescope.yourdomain/api/nodes/resolve",
-  "fullRfLog": false,
-  "rfSampler": false,
+  "fullRfLog": true,
+  "rfSampler": true,
   "regionDiscovery": false
 }
 ```
 > `mqttPassword` is a **publish-only, ACL-constrained** account — it is shipped to browsers, so treat
 > it as shared, not a secret. `resolveUrl` is optional (see CORS below); omit it and the app shows
-> heard-key prefixes instead of node names. `fullRfLog` is optional (default `false`); when `true`,
+> heard-key prefixes instead of node names. `fullRfLog` is optional and **defaults to `true` when the key is absent**; when on,
 > packets the direct-only rule can't attribute (a DIRECT-route path, or noise) are queued and
 > published too, as diagnostic-only rows — never coverage. **This is pure waste unless the CoreScope
 > ingestor also has `clientRxObservations.enabled: true`**: with it off, the ingestor decodes and
 > discards every one of these packets, writing no row and logging no warning, while `fullRfLog`
 > multiplies your normal upload volume. Confirm the ingestor-side flag with your CoreScope sysop
-> before turning this on. `rfSampler` is optional (default `false`); when `true`, the app polls the
+> before turning this on. `rfSampler` is optional and **defaults to `true` when the key is absent**; when on, the app polls the
 > companion's own radio counters (noise floor, RX/TX airtime, CRC errors) over local Bluetooth and
 > publishes them on `meshcore/client/<pubkey>/rf`. **Enable it only after your broker's ACL permits
 > that `/rf` subtopic for this client** — this app negotiates MQTT 3.1.1, whose PUBACK carries no
 > reason code, so a publish denied by the ACL is still acknowledged: the app logs `published N
 > record(s)` and looks healthy while the server receives zero rows. Confirm the topic is allowed
 > (and that the CoreScope ingestor has `clientRfSamples.enabled: true`) with your CoreScope sysop
-> before turning this on. `regionDiscovery` is optional (default `false`); when `true`, this is the
+> before turning this on. `regionDiscovery` is optional and **defaults to `false`** — it is the one flag that stays opt-in; when `true`, this is the
 > **only** part of the app that transmits: once connected it addresses one repeater at a time,
 > round-robin, asking for its declared flood-allowed region list roughly every 60 seconds, and
 > publishes the answer on `meshcore/client/<pubkey>/regions`. It requires companion firmware **v13+**
@@ -129,6 +129,21 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
 > above. Confirm the topic is allowed (and that the CoreScope ingestor has `clientRegions.enabled:
 > true`) with your CoreScope sysop before turning this on — otherwise the ingestor decodes and
 > discards every upload, same as `fullRfLog` off.
+
+> **Why the two logging flags default ON and the transmitting one does not.** An absent flag
+> used to mean off, which made two failures invisible: a `config.json` cached before these keys
+> existed reported both features off while the served file said on, and a config that failed to
+> fetch stopped data *collection* as well as uploading. Data never collected is gone for good;
+> data collected and discarded server-side costs only bandwidth — so silence is read as
+> "collect". The same reasoning applies while **no** config has loaded at all: the app keeps
+> capturing on these defaults and the queue is published once config arrives.
+>
+> Set them explicitly to `false` if your ingestor or broker ACL is not ready for them — an
+> explicit `false` always wins, and per the two warnings above the uploads are otherwise pure
+> volume. `regionDiscovery` is the exception and is never assumed on: it TRANSMITS, against
+> third-party repeaters that rate-limit anonymous requests to 4 per 180 s shared across every
+> requester, so one client asking once a minute already claims most of that budget. Spending
+> someone else's airtime on a guess is not a default.
 
 Changing any value later is just a `config.json` edit + page refresh — no rebuild.
 

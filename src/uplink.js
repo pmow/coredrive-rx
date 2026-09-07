@@ -21,9 +21,14 @@
 // that the UI shows continuously and the exported log records, never an absence
 // of log lines.
 
+import { featureEnabled } from './config.js';
+
 // Region discovery needs FIRMWARE_VER_CODE >= 13 to address a repeater that is
 // not already a saved contact (CMD_SEND_ANON_REQ, companion_radio/MyMesh.cpp).
 export const REGION_DISCOVERY_MIN_FW = 13;
+
+// Feature defaults live in config.js (FEATURE_DEFAULTS); the header reports the ones
+// actually in force so a no-config session still says what it is collecting.
 
 // uplinkState collapses the chain into one name. Order matters: a missing config
 // is reported ahead of everything downstream because it is the upstream cause and
@@ -120,7 +125,10 @@ export function buildLogHeader(info) {
 
   lines.push(config
     ? row('config', 'loaded — fullRfLog=' + onOff(config.fullRfLog) + ' rfSampler=' + onOff(config.rfSampler) + ' regionDiscovery=' + onOff(config.regionDiscovery))
-    : row('config', 'NOT LOADED — nothing can be published and every feature flag reads as off'));
+    : row('config', 'NOT LOADED — nothing can be published; collecting on defaults '
+        + 'fullRfLog=' + onOff(featureEnabled(null, 'fullRfLog'))
+        + ' rfSampler=' + onOff(featureEnabled(null, 'rfSampler'))
+        + ' regionDiscovery=' + onOff(featureEnabled(null, 'regionDiscovery'))));
 
   lines.push(row('firmware', fwVer == null ? 'unknown (device info not read)' : 'v' + fwVer));
 

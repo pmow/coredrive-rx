@@ -175,10 +175,14 @@ test('the header prints every effective config flag, which is how a stale config
   assert.match(h, /regionDiscovery=off/);
 });
 
-test('a missing config is shouted, not printed as a flag list', () => {
+test('a missing config is shouted, and says which defaults are collecting meanwhile', () => {
   const h = buildLogHeader({ ...BASE, config: null, uplink: 'no-config', pending: 412 });
   assert.match(h, /NOT LOADED/);
   assert.match(h, /412 pending/);
+  // A no-config session still collects on defaults — a reader must be able to tell
+  // what is in the 412 records without guessing.
+  assert.match(h, /fullRfLog=on/);
+  assert.match(h, /regionDiscovery=off/);
 });
 
 test('the header states whether region discovery can transmit at all, and why not', () => {

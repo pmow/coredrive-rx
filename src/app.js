@@ -26,7 +26,7 @@ import { shareLog } from './sharelog.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
 import { Publisher } from './publisher.js';
-import { loadConfig, getConfig } from './config.js';
+import { loadConfig, getConfig, featureEnabled } from './config.js';
 import { buildRfLogRecord } from './capture.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
 import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply, heardAskEligible } from './regionreq.js';
@@ -546,8 +546,8 @@ function renderUplinkChip() {
 // single writer of regionsInfo — two writers previously disagreed.
 function applyConfigToSettings() {
   const cfg = getConfig();
-  els('fullRfLogInfo').style.display = cfg && cfg.fullRfLog ? '' : 'none';
-  els('rfSamplerInfo').style.display = cfg && cfg.rfSampler ? '' : 'none';
+  els('fullRfLogInfo').style.display = featureEnabled(cfg, 'fullRfLog') ? '' : 'none';
+  els('rfSamplerInfo').style.display = featureEnabled(cfg, 'rfSampler') ? '' : 'none';
   els('regionsInfo').style.display = cfg && cfg.regionDiscovery ? '' : 'none';
   if (!(cfg && cfg.regionDiscovery)) return;
   // Before the firmware is read, `supported` is still false and fwVer unknown —
@@ -637,7 +637,7 @@ function renderCounters() {
   els('cHex').textContent = String(state.hexCells.size);
   els('cRx').textContent = String(state.rxTotal);
   const cfg = getConfig();
-  const fullRfLog = !!(cfg && cfg.fullRfLog);
+  const fullRfLog = featureEnabled(cfg, 'fullRfLog');
   els('cRfLogRow').style.display = fullRfLog ? '' : 'none';
   if (fullRfLog) els('cRfLog').textContent = String(state.rfLogged);
 }
@@ -772,7 +772,10 @@ async function processFrame(dv) {
     // both are called out. Everything else (tx / no advert) is pure noise, verbose only.
     const lastHop = pkt && pkt.hops.length ? pkt.hops[pkt.hops.length - 1] : null;
     const cfg = getConfig();
-    const logged = cfg && cfg.fullRfLog;
+    // featureEnabled, not `cfg && cfg.fullRfLog`: with no config loaded this used to
+    // read "off" and throw away RF data for the whole session. Collecting queues it
+    // for the publish that happens once config arrives.
+    const logged = featureEnabled(cfg, 'fullRfLog');
     const suffix = logged ? ', logged' : ', skipped';
     if (lastHop && pkt.hops.length && !isFloodRoute(pkt.routeType)) dbg('direct route — transmitter not in path' + suffix, 'st');
     else if (lastHop && lastHop.length === 2) dbg('1-byte path-hash (' + lastHop + ') — seen' + suffix, 'st');
@@ -1068,7 +1071,7 @@ function renderRfSampler() {
 
 function startRfSampler() {
   const cfg = getConfig();
-  if (!cfg || !cfg.rfSampler) return;
+  if (!featureEnabled(cfg, 'rfSampler')) return;
 
   // Generation guard: a tick awaits state.queue.add(sample) mid-cycle. If
   // disconnectAll() → stopRfSampler() → startRfSampler() (reconnect) all happen

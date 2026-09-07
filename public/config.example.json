@@ -3,7 +3,7 @@
   "mqttUsername": "coredrive-rx",
   "mqttPassword": "<publish-only EMQX account password>",
   "resolveUrl": "https://corescope.example/api/nodes/resolve",
-  "fullRfLog": false,
-  "rfSampler": false,
+  "fullRfLog": true,
+  "rfSampler": true,
   "regionDiscovery": false
 }

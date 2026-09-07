@@ -2,7 +2,7 @@
 // Run: node --test
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { normalizeConfig } from '../src/config.js';
+import { normalizeConfig, featureEnabled } from '../src/config.js';
 
 test('normalizeConfig requires mqttUrl', () => {
   assert.throws(() => normalizeConfig({ mqttUsername: 'x' }), /mqttUrl/);
@@ -34,19 +34,49 @@ test('normalizeConfig defaults mqttPassword to empty string when absent', () => 
   assert.strictEqual(c.mqttPassword, '');
 });
 
-test('fullRfLog defaults to false and accepts true', () => {
+// The two LOGGING features default ON when the key is absent. A config written
+// before they existed used to turn them off silently, which is indistinguishable
+// from the feature being broken — and data not collected during that window is
+// gone for good, whereas data collected and discarded server-side costs only
+// bandwidth. An explicit `false` still wins; only silence is read as "collect".
+test('fullRfLog defaults to ON when absent, and an explicit false still wins', () => {
   const base = { mqttUrl: 'wss://b.example/ws' };
-  assert.equal(normalizeConfig(base).fullRfLog, false);
+  assert.equal(normalizeConfig(base).fullRfLog, true);
   assert.equal(normalizeConfig({ ...base, fullRfLog: true }).fullRfLog, true);
-  // Anything non-boolean is coerced, never left undefined.
+  assert.equal(normalizeConfig({ ...base, fullRfLog: false }).fullRfLog, false);
+  // Anything non-boolean that IS present is coerced, never left undefined.
   assert.equal(normalizeConfig({ ...base, fullRfLog: 'yes' }).fullRfLog, true);
   assert.equal(normalizeConfig({ ...base, fullRfLog: 0 }).fullRfLog, false);
+  assert.equal(normalizeConfig({ ...base, fullRfLog: null }).fullRfLog, false);
 });
 
-test('rfSampler defaults to false', () => {
+test('rfSampler defaults to ON when absent, and an explicit false still wins', () => {
   const base = { mqttUrl: 'wss://b.example/ws' };
-  assert.equal(normalizeConfig(base).rfSampler, false);
+  assert.equal(normalizeConfig(base).rfSampler, true);
+  assert.equal(normalizeConfig({ ...base, rfSampler: false }).rfSampler, false);
   assert.equal(normalizeConfig({ ...base, rfSampler: true }).rfSampler, true);
+});
+
+// --- featureEnabled: the case every gate in app.js used to get wrong ----------
+
+test('featureEnabled treats a MISSING config as "collect anyway" for the logging features', () => {
+  // `!cfg || !cfg.X` read "we do not know yet" as "off", so a config that failed to
+  // load stopped data COLLECTION as well as uploading — and the collection window
+  // is unrecoverable. Records queued now are published once config arrives.
+  assert.equal(featureEnabled(null, 'fullRfLog'), true);
+  assert.equal(featureEnabled(null, 'rfSampler'), true);
+});
+
+test('featureEnabled never turns on a transmitting feature without a config saying so', () => {
+  // regionDiscovery is the only feature that transmits, against third-party
+  // repeaters that rate-limit anon requests to 4 per 180s shared across everyone.
+  // Guessing "on" spends someone else's budget on an assumption.
+  assert.equal(featureEnabled(null, 'regionDiscovery'), false);
+});
+
+test('featureEnabled honours a loaded config over the default, in both directions', () => {
+  assert.equal(featureEnabled({ fullRfLog: false }, 'fullRfLog'), false);
+  assert.equal(featureEnabled({ regionDiscovery: true }, 'regionDiscovery'), true);
 });
 
 test('regionDiscovery defaults to false — this is the only transmitting feature, opt-in only', () => {

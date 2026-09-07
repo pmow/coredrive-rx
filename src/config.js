@@ -1,6 +1,32 @@
 // Runtime deployment config, fetched from config.json (served next to
 // index.html) at startup. Nothing is baked into the bundle — sysops edit
 // config.json, not source. See config.example.json for the shape.
+// FEATURE_DEFAULTS: what a feature flag means when nothing states it — an absent
+// key in config.json, or no config at all.
+//
+// The two LOGGING features default ON. Two field failures made the case: a config
+// cached before they existed silently reported both off, and a config that failed to
+// load turned off data COLLECTION as well as uploading. Both are invisible, and both
+// destroy a window of coverage data that cannot be recovered — whereas data that is
+// collected and then discarded server-side costs only bandwidth. Silence therefore
+// means "collect it"; an explicit `false` still switches it off.
+//
+// regionDiscovery stays OFF by default because it is the only feature that
+// TRANSMITS. It addresses third-party repeaters, which rate-limit anonymous
+// requests to 4 per 180s shared across every requester and type, so one client
+// asking once a minute already claims most of that budget. Turning that on by
+// assumption spends someone else's airtime; it must be an opt-in.
+export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: false };
+
+// featureEnabled resolves one flag, INCLUDING the case every gate in app.js used to
+// get wrong: `config === null`. Those gates read `!cfg || !cfg.X`, which treats "we
+// do not know yet" as "off" — the reading that cost a session's worth of RF data on
+// top of its uploads.
+export function featureEnabled(config, name) {
+  if (!config || config[name] === undefined) return FEATURE_DEFAULTS[name] === true;
+  return !!config[name];
+}
+
 let cfg = null;
 let inFlight = null; // in-flight loadConfig promise, so concurrent retries share one fetch
 
@@ -14,9 +40,11 @@ export function normalizeConfig(raw) {
     mqttUsername: String(raw.mqttUsername || '').trim(),
     mqttPassword: raw.mqttPassword == null ? '' : String(raw.mqttPassword),
     resolveUrl: String(raw.resolveUrl || '').trim(),
-    fullRfLog: !!raw.fullRfLog,
-    rfSampler: !!raw.rfSampler,
-    regionDiscovery: !!raw.regionDiscovery,
+    // Absent → FEATURE_DEFAULTS; present → coerced. See FEATURE_DEFAULTS above for
+    // why the two logging flags and the transmitting one differ.
+    fullRfLog: featureEnabled(raw, 'fullRfLog'),
+    rfSampler: featureEnabled(raw, 'rfSampler'),
+    regionDiscovery: featureEnabled(raw, 'regionDiscovery'),
   };
   if (!c.mqttUrl) throw new Error('config.json: "mqttUrl" is required');
   return c;
