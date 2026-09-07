@@ -67,11 +67,14 @@ test('featureEnabled treats a MISSING config as "collect anyway" for the logging
   assert.equal(featureEnabled(null, 'rfSampler'), true);
 });
 
-test('featureEnabled never turns on a transmitting feature without a config saying so', () => {
-  // regionDiscovery is the only feature that transmits, against third-party
-  // repeaters that rate-limit anon requests to 4 per 180s shared across everyone.
-  // Guessing "on" spends someone else's budget on an assumption.
+test('featureEnabled never transmits on a guess: no config means regionDiscovery off', () => {
+  // With no config the app cannot know whose mesh it is on, and repeaters rate-limit
+  // anonymous requests to 4 per 180s shared across every requester — one client
+  // asking once a minute already claims most of that. Collecting costs bandwidth;
+  // transmitting costs a stranger's airtime, so only the former is assumed.
   assert.equal(featureEnabled(null, 'regionDiscovery'), false);
+  // ...but an existing config that merely omits the key does enable it.
+  assert.equal(featureEnabled({ mqttUrl: 'wss://b/ws' }, 'regionDiscovery'), true);
 });
 
 test('featureEnabled honours a loaded config over the default, in both directions', () => {
@@ -79,9 +82,15 @@ test('featureEnabled honours a loaded config over the default, in both direction
   assert.equal(featureEnabled({ regionDiscovery: true }, 'regionDiscovery'), true);
 });
 
-test('regionDiscovery defaults to false — this is the only transmitting feature, opt-in only', () => {
+// regionDiscovery is the one flag whose default differs by SOURCE, because it is
+// the only feature that transmits. An existing config.json is a deployment whose
+// operator owns the repeaters being asked, so an absent key there means on. No
+// config at all means the app knows nothing about where it is, and guessing "on"
+// would spend a stranger's rate-limited anon budget — see the no-config test below.
+test('regionDiscovery defaults to ON when an existing config omits the key', () => {
   const base = { mqttUrl: 'wss://b.example/ws' };
-  assert.equal(normalizeConfig(base).regionDiscovery, false);
+  assert.equal(normalizeConfig(base).regionDiscovery, true);
+  assert.equal(normalizeConfig({ ...base, regionDiscovery: false }).regionDiscovery, false);
   assert.equal(normalizeConfig({ ...base, regionDiscovery: true }).regionDiscovery, true);
 });
 

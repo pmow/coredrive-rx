@@ -1,29 +1,35 @@
 // Runtime deployment config, fetched from config.json (served next to
 // index.html) at startup. Nothing is baked into the bundle — sysops edit
 // config.json, not source. See config.example.json for the shape.
-// FEATURE_DEFAULTS: what a feature flag means when nothing states it — an absent
-// key in config.json, or no config at all.
+// Feature-flag defaults, in two tables because the safe answer depends on WHERE
+// the silence comes from.
 //
-// The two LOGGING features default ON. Two field failures made the case: a config
-// cached before they existed silently reported both off, and a config that failed to
-// load turned off data COLLECTION as well as uploading. Both are invisible, and both
-// destroy a window of coverage data that cannot be recovered — whereas data that is
-// collected and then discarded server-side costs only bandwidth. Silence therefore
-// means "collect it"; an explicit `false` still switches it off.
-//
-// regionDiscovery stays OFF by default because it is the only feature that
-// TRANSMITS. It addresses third-party repeaters, which rate-limit anonymous
-// requests to 4 per 180s shared across every requester and type, so one client
-// asking once a minute already claims most of that budget. Turning that on by
-// assumption spends someone else's airtime; it must be an opt-in.
-export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: false };
+// FEATURE_DEFAULTS applies to an absent key in a config.json that EXISTS. Two field
+// failures made the case for reading silence as "on": a config cached before these
+// keys existed reported the features off while the served file said on, and that is
+// indistinguishable from the features being broken. An explicit `false` still wins.
+export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: true };
 
-// featureEnabled resolves one flag, INCLUDING the case every gate in app.js used to
-// get wrong: `config === null`. Those gates read `!cfg || !cfg.X`, which treats "we
-// do not know yet" as "off" — the reading that cost a session's worth of RF data on
-// top of its uploads.
+// NO_CONFIG_DEFAULTS applies when NO config loaded at all. The two logging features
+// stay on: data never collected is gone for good, while data collected and discarded
+// server-side costs only bandwidth, and the queue publishes once config arrives.
+//
+// regionDiscovery is the one flag that differs, and only here, because it is the only
+// feature that TRANSMITS. An existing config.json is a deployment whose operator owns
+// the repeaters being asked; no config means the app knows nothing about whose mesh it
+// is on. Repeaters rate-limit anonymous requests to 4 per 180s SHARED across every
+// requester and type, so one client asking once a minute already claims most of that
+// budget. Collecting on an assumption spends our own bandwidth; transmitting on one
+// spends a stranger's airtime.
+export const NO_CONFIG_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: false };
+
+// featureEnabled resolves one flag from whatever is known, INCLUDING the case every
+// gate in app.js used to get wrong: `config === null`. Those gates read
+// `!cfg || !cfg.X`, treating "we do not know yet" as "off" — the reading that cost a
+// whole session's RF data on top of its uploads.
 export function featureEnabled(config, name) {
-  if (!config || config[name] === undefined) return FEATURE_DEFAULTS[name] === true;
+  if (!config) return NO_CONFIG_DEFAULTS[name] === true;
+  if (config[name] === undefined) return FEATURE_DEFAULTS[name] === true;
   return !!config[name];
 }
 

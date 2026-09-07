@@ -5,5 +5,5 @@
   "resolveUrl": "https://corescope.example/api/nodes/resolve",
   "fullRfLog": true,
   "rfSampler": true,
-  "regionDiscovery": false
+  "regionDiscovery": true
 }

@@ -216,7 +216,7 @@ function maybeQueryRegions() {
   r.lastEvalAt = Date.now();
   // noteRegionInert says which gate is holding this, exactly once — the four
   // reasons were previously indistinguishable from an empty candidate pool.
-  if (!cfg || !cfg.regionDiscovery || !r.supported) { noteRegionInert(); return; }
+  if (!featureEnabled(cfg, 'regionDiscovery') || !r.supported) { noteRegionInert(); return; }
   const candidates = Array.from(r.candidates, ([pubkey, advertTs]) => ({ pubkey, advertTs }));
   const target = selectNextTarget({
     candidates, answered: r.answered, demoted: r.demoted, cursor: r.cursor,
@@ -244,7 +244,7 @@ function maybeAskHeardTarget(target, advertTs) {
   if (!state.transport) return;
   const r = state.regions;
   const cfg = getConfig();
-  if (!cfg || !cfg.regionDiscovery || !r.supported) return;
+  if (!featureEnabled(cfg, 'regionDiscovery') || !r.supported) return;
   const now = Date.now();
   if (!heardAskEligible(target, advertTs, r, now)) return;
   // Consume the shared budget here, same as the timer path — both paths stamp the
@@ -548,8 +548,9 @@ function applyConfigToSettings() {
   const cfg = getConfig();
   els('fullRfLogInfo').style.display = featureEnabled(cfg, 'fullRfLog') ? '' : 'none';
   els('rfSamplerInfo').style.display = featureEnabled(cfg, 'rfSampler') ? '' : 'none';
-  els('regionsInfo').style.display = cfg && cfg.regionDiscovery ? '' : 'none';
-  if (!(cfg && cfg.regionDiscovery)) return;
+  const regionsOn = featureEnabled(cfg, 'regionDiscovery');
+  els('regionsInfo').style.display = regionsOn ? '' : 'none';
+  if (!regionsOn) return;
   // Before the firmware is read, `supported` is still false and fwVer unknown —
   // reporting it "off" there would be a verdict on no evidence.
   if (state.fwVer == null && !state.connected) { els('regionsInfo').textContent = 'Region discovery: on (firmware checked on connect)'; return; }
@@ -826,7 +827,7 @@ async function processFrame(dv) {
   // is deliberate: it costs ~19 requests against the ~180 the discover sweep already
   // sends, and it keeps every stored list demonstrably current instead of assumed.
   const regionsCfg = getConfig();
-  if (regionsCfg && regionsCfg.regionDiscovery && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
+  if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'advert' && pkt.advertType === ADV_TYPE_REPEATER && pkt.advertTs != null) {
     state.regions.candidates.set(hk.heardKey, pkt.advertTs);
     maybeAskHeardTarget(hk.heardKey, pkt.advertTs);
   }
@@ -837,7 +838,7 @@ async function processFrame(dv) {
   // stored null: selectNextTarget's due() rule (answered.get(pubkey) !== advertTs)
   // then asks it once per session and re-asks automatically if a real advert with a
   // timestamp later arrives. Async and non-blocking — a failed resolve just adds nothing.
-  if (regionsCfg && regionsCfg.regionDiscovery && hk.src === 'discover' && pkt.discoverType === ADV_TYPE_REPEATER) {
+  if (featureEnabled(regionsCfg, 'regionDiscovery') && hk.src === 'discover' && pkt.discoverType === ADV_TYPE_REPEATER) {
     resolvePubkey(hk.heardKey).then((pk) => {
       if (!pk) return;
       state.regions.candidates.set(pk, null);
