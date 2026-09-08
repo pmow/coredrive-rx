@@ -5,16 +5,34 @@
 // meshcore/client/{PUBLIC_KEY}/regions (region-discovery answers).
 import mqtt from 'mqtt';
 
-export class Publisher {
-  // opts: { url, username, password } — EMQX WSS endpoint + per-client creds.
-  constructor(opts) { this.opts = opts; this.client = null; this._onStatus = null; }
+// KEEPALIVE is set EXPLICITLY rather than inherited. mqtt.js defaults to 60 s and arms
+// its keepalive manager only inside _onConnect, and only when one does not already exist
+// (client.js:1101) — it never re-arms an existing manager. So a manager that survives a
+// connection carries its counter into the next one and can report a bogus
+// 'Keepalive timeout' on a perfectly healthy link. Stating the value here means the log
+// can quote it, which is what turns that error from a red herring into evidence.
+export const KEEPALIVE_SECS = 60;
 
-  // onStatus(cb): cb(state, arg) is called on connection lifecycle changes, where state
-  // is 'connect' | 'reconnect' | 'offline' | 'close' | 'error' (arg = Error for 'error').
+// Every Publisher gets a monotonic id. A single module-level status handler in app.js
+// receives events from EVERY instance ever created, so without an id a stale client's
+// failures are indistinguishable from the live one's — and they overwrote the broker
+// state. Field symptom: ~18 'Keepalive timeout' errors against a single successful
+// connect, which is arithmetically impossible for one client (each timeout needs its own
+// CONNACK-armed manager, and _cleanUp destroys the manager), yet nothing in the log could
+// attribute them.
+let seq = 0;
+
+export class Publisher {
+  // opts: { url, username, password, clientId } — EMQX WSS endpoint + per-client creds.
+  constructor(opts) { this.opts = opts; this.client = null; this._onStatus = null; this.id = ++seq; }
+
+  // onStatus(cb): cb(state, arg, id) is called on connection lifecycle changes, where
+  // state is 'connect' | 'reconnect' | 'offline' | 'close' | 'error' (arg = the CONNACK
+  // packet for 'connect', an Error for 'error') and id identifies THIS publisher.
   // Drives the Home upload indicator, the debug log, and a drain kick on reconnect.
   onStatus(cb) { this._onStatus = cb; }
 
-  _emit(ev, arg) { if (this._onStatus) this._onStatus(ev, arg); }
+  _emit(ev, arg) { if (this._onStatus) this._onStatus(ev, arg, this.id); }
 
   connect() {
     this.client = mqtt.connect(this.opts.url, {
@@ -22,10 +40,14 @@ export class Publisher {
       password: this.opts.password,
       clientId: this.opts.clientId, // = companion pubkey; EMQX ACL can bind topics to ${clientid}
       reconnectPeriod: 4000,
+      keepalive: KEEPALIVE_SECS,
       clean: true,
     });
+    // 'connect' carries the CONNACK packet through, so the log can record its return
+    // code instead of leaving an auth or takeover refusal indistinguishable from a
+    // network failure.
     for (const ev of ['connect', 'reconnect', 'offline', 'close']) {
-      this.client.on(ev, () => this._emit(ev));
+      this.client.on(ev, (packet) => this._emit(ev, packet));
     }
     // PERSISTENT error listener. mqtt.js is an EventEmitter: an 'error' with no listener
     // throws and can wedge the auto-reconnect loop — which left the client permanently

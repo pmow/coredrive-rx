@@ -25,7 +25,8 @@ import {
 import { shareLog } from './sharelog.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
-import { Publisher } from './publisher.js';
+import { Publisher, KEEPALIVE_SECS } from './publisher.js';
+import { drainOnce } from './drain.js';
 import { loadConfig, getConfig, featureEnabled } from './config.js';
 import { buildRfLogRecord } from './capture.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
@@ -53,6 +54,11 @@ const state = {
   // dbg line rolls out of the 200-line buffer within minutes, a header cannot.
   fwVer: null, uplink: 'no-config', lastUplinkLogged: null, lastRegionInertLogged: null,
   pendingCount: 0, lastConfigTryAt: null,
+  // pubFailures: consecutive publish failures per queue id, so one unpublishable
+  // record can be stepped over instead of blocking every record behind it forever.
+  // staleReported: ids of retired publishers already called out, so an orphaned
+  // client's endless reconnect loop is named once rather than flooding the log.
+  pubFailures: new Map(), staleReported: new Set(),
   lastHeard: null, snrBarPct: 0, snrPeakPct: 0,
   // auto-discover
   lastHeardAt: null, lastFireAt: 0, tick: null,
@@ -573,7 +579,15 @@ function noteRegionInert() {
 // Split out of connectAll so a config that only arrives on a LATER retry can bring
 // uploading up on its own, without the user reconnecting the companion.
 async function startPublisher() {
-  if (state.publisher) return true;
+  if (state.publisher) {
+    if (state.publisher.connected()) return true;
+    // Never ADOPT a publisher that is not connected. It has its own 4 s reconnect loop,
+    // and reporting success for it made connectAll print '③ CoreScope connected ✓' over
+    // a client that was in fact looping. Retiring it stops that loop and its events.
+    dbg('retiring publisher #' + state.publisher.id + ' — it was not connected', 'no');
+    state.publisher.end();
+    state.publisher = null;
+  }
   const cfg = getConfig();
   if (!cfg || !cfg.mqttUrl) return false;
   state.publisher = new Publisher({ url: cfg.mqttUrl, username: cfg.mqttUsername, password: cfg.mqttPassword, clientId: state.companionPubkey });
@@ -729,9 +743,22 @@ function renderBroker() {
 
 // onBrokerStatus logs every MQTT lifecycle change to the debug log (previously invisible,
 // so a field disconnect couldn't be diagnosed) and flushes the backlog on (re)connect.
-function onBrokerStatus(s, arg) {
+function onBrokerStatus(s, arg, id) {
+  // Only the CURRENT publisher may move the broker state. An orphaned client keeps its
+  // own 4 s reconnect loop running and its failures used to overwrite brokerState, so a
+  // healthy link was reported as down and the log filled with errors nobody could
+  // attribute — ~18 'Keepalive timeout' lines against a single successful connect,
+  // which is impossible for one client. Name each stale publisher once, then ignore it.
+  const live = state.publisher ? state.publisher.id : null;
+  if (id !== live) {
+    if (!state.staleReported.has(id)) {
+      state.staleReported.add(id);
+      dbg('ignoring MQTT events from retired publisher #' + id + ' (live: ' + (live ?? 'none') + '), first was "' + s + '"', 'no');
+    }
+    return;
+  }
   state.brokerState = s;
-  if (s === 'connect') dbg('CoreScope connected', 'ok');
+  if (s === 'connect') dbg('CoreScope connected (publisher #' + id + ', connack rc=' + ((arg && arg.returnCode) ?? '?') + ', keepalive ' + KEEPALIVE_SECS + 's)', 'ok');
   else if (s === 'reconnect') dbg('CoreScope reconnecting…', 'st');
   else if (s === 'offline') dbg('CoreScope offline (no network?)', 'no');
   else if (s === 'close') dbg('CoreScope connection closed', 'no');
@@ -886,19 +913,28 @@ async function refreshCounters() {
   renderStatusStrip();
 }
 
-// drain publishes all buffered receptions once. Returns the count published. Isolated
-// from the loop so the "Push pending now" button can call it directly.
+// drain publishes as much of the buffered queue as the link allows, once. The loop and
+// its commit rules live in src/drain.js (tested there); this is only the wiring.
+//
+// It used to collect every published id and call queue.remove ONCE after the loop, so a
+// single rejecting publish threw the progress away — and since publishes are sequential,
+// a 59-record backlog needs ~5 s of continuous link at 86 ms round-trip and ~18 s at
+// 300 ms. On a mobile link that stayed up about a second at a time, that design could
+// never commit anything at all.
 async function drain() {
-  if (!(state.publisher && state.publisher.connected() && state.companionPubkey)) return 0;
-  const rows = await state.queue.takeAll();
-  const done = [];
-  for (const r of rows) { await state.publisher.publish(state.companionPubkey, r, state.companionName); done.push(r.id); }
-  if (done.length) {
-    await state.queue.remove(done);
+  const r = await drainOnce({
+    queue: state.queue,
+    publisher: state.publisher,
+    pubkey: state.companionPubkey,
+    name: state.companionName,
+    failures: state.pubFailures,
+    log: dbg,
+  });
+  if (r.committed) {
     state.lastUploadAt = Date.now();
-    dbg('published ' + done.length + ' record(s)', 'ok');
+    dbg('published ' + r.committed + ' record(s)' + (r.stopped === 'link' ? ' before the link dropped — rest kept' : ''), 'ok');
   }
-  return done.length;
+  return r.committed;
 }
 
 // drainLoop runs forever every 5 s. A publish to a dead socket never acks, but

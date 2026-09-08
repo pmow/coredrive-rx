@@ -4,7 +4,7 @@
 // Run: node --test
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { Publisher } from '../src/publisher.js';
+import { Publisher, KEEPALIVE_SECS } from '../src/publisher.js';
 
 const rec = { rx_at: 't', raw: 'aa', snr: 1, rssi: -90, lat: 0, lon: 0, acc_m: 5 };
 
@@ -98,4 +98,30 @@ test('truncated is carried faithfully, true and false alike', () => {
     repeater_clock: 1, lat: null, lon: null, acc_m: null };
   assert.equal(Publisher.payloadFor('aa11', { ...base, truncated: true }, 'node').truncated, true);
   assert.equal(Publisher.payloadFor('aa11', { ...base, truncated: false }, 'node').truncated, false);
+});
+
+// --- publisher identity: attributing a status event to the client that raised it ---
+
+test('each Publisher gets a distinct id so a stale client can be told apart', () => {
+  const a = new Publisher({ url: 'wss://b/ws' });
+  const b = new Publisher({ url: 'wss://b/ws' });
+  assert.notStrictEqual(a.id, b.id);
+  assert.ok(b.id > a.id, 'ids must be monotonic so "newer" is decidable');
+});
+
+test('status events carry the publisher id', () => {
+  // A single module-level handler receives events from every instance ever made.
+  // Without the id, an orphaned client's failures overwrote the live one's state.
+  const p = new Publisher({ url: 'wss://b/ws' });
+  const seen = [];
+  p.onStatus((ev, arg, id) => seen.push([ev, arg, id]));
+  p._emit('error', new Error('Keepalive timeout'));
+  assert.strictEqual(seen[0][0], 'error');
+  assert.strictEqual(seen[0][1].message, 'Keepalive timeout');
+  assert.strictEqual(seen[0][2], p.id);
+});
+
+test('keepalive is stated explicitly, not inherited from mqtt.js', () => {
+  assert.strictEqual(typeof KEEPALIVE_SECS, 'number');
+  assert.ok(KEEPALIVE_SECS > 0);
 });
