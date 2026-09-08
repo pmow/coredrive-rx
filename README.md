@@ -61,10 +61,20 @@ is **no central server** — you point the app at your own MQTT broker and CoreS
   PWA install both require a secure (HTTPS) context. Connect via the hostname (not an IP).
 
 ### 2. EMQX: a publish-only account
-Create a dedicated account and an ACL so a client can only publish to its own topic:
-- **Allow** `publish` to `meshcore/client/${clientid}/packets`
+Create a dedicated account and an ACL so a client can only publish to its own topics:
+- **Allow** `publish` to `meshcore/client/${clientid}/packets` — receptions (always used)
+- **Allow** `publish` to `meshcore/client/${clientid}/rf` — RF samples (`rfSampler`, on by default)
+- **Allow** `publish` to `meshcore/client/${clientid}/regions` — region answers (`regionDiscovery`)
 - **Deny** everything else (publish `#`, subscribe `#`)
 - Enable the WebSocket/TLS listener (default port `8084`, path `/ws`).
+
+> **All three subtopics belong in the ACL from the start**, even if you intend to leave a
+> feature off: the flags default to on, so a client will try. What a denied publish does
+> depends on your EMQX `authorization.deny_action` — with the default `ignore` the message
+> is silently dropped and still PUBACKed (the app logs `published N record(s)` while the
+> server stores nothing, see the flag warnings below); with `disconnect` the broker **kicks
+> the client**, which produces an endless connect→drop→reconnect loop and a queue that never
+> drains. Adding the rules up front avoids both.
 
 The app sets `clientId` = the companion's pubkey, so the ACL binds each user to their own topic.
 
