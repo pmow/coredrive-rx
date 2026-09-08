@@ -26,7 +26,7 @@ import { shareLog } from './sharelog.js';
 import { Gps } from './gps.js';
 import { Queue } from './queue.js';
 import { Publisher, KEEPALIVE_SECS } from './publisher.js';
-import { drainOnce } from './drain.js';
+import { drainOnce, serialiseDrain } from './drain.js';
 import { loadConfig, getConfig, featureEnabled } from './config.js';
 import { buildRfLogRecord } from './capture.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
@@ -921,7 +921,12 @@ async function refreshCounters() {
 // a 59-record backlog needs ~5 s of continuous link at 86 ms round-trip and ~18 s at
 // 300 ms. On a mobile link that stayed up about a second at a time, that design could
 // never commit anything at all.
-async function drain() {
+// Serialised: drainLoop, the broker 'connect' event, the 'online' event and the Push
+// button all call this, and two overlapping passes each take their own queue snapshot
+// and publish the SAME rows. Seen in the field as 'published 59 record(s)' followed one
+// second later by 'published 49 record(s)' for a 59-record queue — 49 duplicate rows
+// delivered to the ingestor. A caller arriving mid-pass now joins the running one.
+const drain = serialiseDrain(async () => {
   const r = await drainOnce({
     queue: state.queue,
     publisher: state.publisher,
@@ -935,7 +940,7 @@ async function drain() {
     dbg('published ' + r.committed + ' record(s)' + (r.stopped === 'link' ? ' before the link dropped — rest kept' : ''), 'ok');
   }
   return r.committed;
-}
+});
 
 // drainLoop runs forever every 5 s. A publish to a dead socket never acks, but
 // publisher.publish now times out (rejecting), and rescheduling lives in `finally`, so a

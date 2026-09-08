@@ -156,3 +156,46 @@ test('repeated LINK drops never quarantine an innocent record', async () => {
   assert.strictEqual(failures.size, 0, 'no strikes may accumulate from link drops');
   assert.deepStrictEqual(q.remaining(), [1, 2, 3], 'nothing lost, nothing skipped');
 });
+
+// --- serialiseDrain: two passes must never publish the same rows -------------
+
+test('serialiseDrain joins a concurrent caller onto the pass already running', async () => {
+  // Field evidence: "published 59 record(s)" followed one second later by
+  // "published 49 record(s)" for a 59-record queue. 59 - 49 = 10 = COMMIT_EVERY:
+  // a second pass called takeAll() after the first had committed its opening batch,
+  // saw the other 49 still queued, and delivered every one of them a second time.
+  // Callers are drainLoop (5 s), the broker 'connect' event, the 'online' event and
+  // the Push button — none of which coordinated.
+  const { serialiseDrain } = await import('../src/drain.js');
+  let starts = 0;
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const drain = serialiseDrain(async () => { starts++; await gate; return 'result'; });
+
+  const a = drain();
+  const b = drain();
+  const c = drain();
+  release();
+  assert.deepStrictEqual(await Promise.all([a, b, c]), ['result', 'result', 'result']);
+  assert.strictEqual(starts, 1, 'exactly one pass may run');
+});
+
+test('serialiseDrain allows a NEW pass once the previous one finished', async () => {
+  const { serialiseDrain } = await import('../src/drain.js');
+  let starts = 0;
+  const drain = serialiseDrain(async () => { starts++; });
+  await drain();
+  await drain();
+  assert.strictEqual(starts, 2);
+});
+
+test('serialiseDrain releases the slot after a rejection, and propagates it', async () => {
+  // A failed pass must not wedge every future drain — that would be the config-load
+  // bug all over again, in the publish path.
+  const { serialiseDrain } = await import('../src/drain.js');
+  let starts = 0;
+  const drain = serialiseDrain(async () => { starts++; if (starts === 1) throw new Error('boom'); return 'ok'; });
+  await assert.rejects(() => drain(), /boom/);
+  assert.strictEqual(await drain(), 'ok', 'the slot must be free again');
+  assert.strictEqual(starts, 2);
+});

@@ -101,3 +101,29 @@ export async function drainOnce({ queue, publisher, pubkey, name, failures, log 
 
   return { published, committed, skipped, stopped };
 }
+
+// serialiseDrain wraps a drain function so only ONE pass runs at a time; a caller
+// arriving mid-pass joins the one already running instead of starting its own.
+//
+// Four call sites had no coordination: the 5 s drainLoop, the broker 'connect' event,
+// the 'online' event and the "Push pending now" button. Two overlapping passes each
+// call queue.takeAll(), so both see — and both PUBLISH — the rows the other has not
+// committed yet. Observed in the field as `published 59 record(s)` followed one second
+// later by `published 49 record(s)` for a 59-record queue: the second pass started
+// after the first had committed its opening batch of COMMIT_EVERY, found the other 49
+// still queued, and delivered every one of them to the ingestor a second time.
+//
+// Joining rather than queueing a follow-up is deliberate: the second caller wants to
+// know the outcome, and anything queued after the running pass took its snapshot is
+// picked up by the next 5 s tick anyway. The slot is released on rejection too, so a
+// failed pass can never wedge every future drain.
+export function serialiseDrain(fn) {
+  let inFlight = null;
+  return (...args) => {
+    if (inFlight) return inFlight;
+    inFlight = Promise.resolve()
+      .then(() => fn(...args))
+      .finally(() => { inFlight = null; });
+    return inFlight;
+  };
+}
