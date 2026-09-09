@@ -207,3 +207,17 @@ test('the header never leaks the broker password even if handed the whole config
   const h = buildLogHeader({ ...BASE, config: { ...CFG, mqttPassword: 'sup3rs3cret', mqttUsername: 'u', mqttUrl: 'wss://b/ws' } });
   assert.doesNotMatch(h, /sup3rs3cret/);
 });
+
+// verifyAdverts changes which identities reach CoreScope, so a log that does not say
+// whether it was on cannot be read: an advert missing from a capture is then either a
+// rejected forgery or a bug, with nothing to tell them apart.
+test('the header prints whether advert signatures were verified', () => {
+  const on = buildLogHeader({ ...BASE, config: { fullRfLog: true, rfSampler: true, regionDiscovery: true, verifyAdverts: true } });
+  assert.match(on, /verifyAdverts=on/);
+  const off = buildLogHeader({ ...BASE, config: { fullRfLog: true, rfSampler: true, regionDiscovery: true } });
+  assert.match(off, /verifyAdverts=off/);
+});
+
+test('a missing config says advert verification is off, not silent about it', () => {
+  assert.match(buildLogHeader({ ...BASE, config: null, uplink: 'no-config' }), /verifyAdverts=off/);
+});

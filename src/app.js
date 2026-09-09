@@ -29,6 +29,7 @@ import { Publisher, KEEPALIVE_SECS } from './publisher.js';
 import { drainOnce, serialiseDrain } from './drain.js';
 import { loadConfig, getConfig, featureEnabled } from './config.js';
 import { buildRfLogRecord } from './capture.js';
+import { heardKeyAfterVerify } from './advertsig.js';
 import { buildStatsRequest, parseStats, mergeSample, nextSampleDelay, STATS_CORE, STATS_RADIO, STATS_PACKETS } from './rfstats.js';
 import { buildRegionsRequest, parseRegionsResponse, selectNextTarget, parseSentAck, applyRegionsReply, heardAskEligible } from './regionreq.js';
 import { regionsRows } from './regionsview.js';
@@ -793,7 +794,14 @@ async function processFrame(dv) {
   const sig = ' snr=' + f.snr + ' rssi=' + f.rssi;
   if (state.verbose) dbg('0x88 raw=' + rawHex + sig, 'st'); // raw bytes only when verbose-debugging
   const pkt = parsePacket(f.raw);
-  const hk = deriveHeardKey('rx', pkt);
+  // An advert's Ed25519 signature is the only proof that the pubkey in it belongs to a
+  // node that exists. Gated behind verifyAdverts, a failed check drops the identity and
+  // leaves the reception itself in the non-attributed path below, where the measurement
+  // is still recorded. Named in the log, because "the advert is missing" and "the advert
+  // was forged" are otherwise the same silence.
+  const claimed = deriveHeardKey('rx', pkt);
+  const hk = await heardKeyAfterVerify(claimed, pkt, featureEnabled(getConfig(), 'verifyAdverts'));
+  if (claimed && !hk) dbg('advert ' + claimed.heardKey.slice(0, 8) + '… failed its signature check, identity dropped', 'no');
   if (!hk) {
     // Explain why a frame wasn't attributed. Direct multi-hop packets can't be credited (the
     // transmitter removed itself from the path's front), and 1-byte hops are collision-prone —

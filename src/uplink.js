@@ -107,7 +107,7 @@ export function regionInertReason({ config, supported, fwVer }) {
 // the way a startup line does — which is precisely what made two field logs
 // unattributable to a version.
 //
-// Reads only the three feature flags by name and never iterates the config, so the
+// Reads only the four feature flags by name and never iterates the config, so the
 // broker password cannot reach an exported file no matter what is passed in.
 export function buildLogHeader(info) {
   const {
@@ -123,12 +123,17 @@ export function buildLogHeader(info) {
     row('generated', nowISO),
   ];
 
+  // verifyAdverts goes through featureEnabled rather than being read off the config
+  // directly, so the header reports what the capture gate in app.js actually did. The
+  // three above predate that helper and keep their raw reads.
   lines.push(config
-    ? row('config', 'loaded — fullRfLog=' + onOff(config.fullRfLog) + ' rfSampler=' + onOff(config.rfSampler) + ' regionDiscovery=' + onOff(config.regionDiscovery))
+    ? row('config', 'loaded — fullRfLog=' + onOff(config.fullRfLog) + ' rfSampler=' + onOff(config.rfSampler) + ' regionDiscovery=' + onOff(config.regionDiscovery)
+        + ' verifyAdverts=' + onOff(featureEnabled(config, 'verifyAdverts')))
     : row('config', 'NOT LOADED — nothing can be published; collecting on defaults '
         + 'fullRfLog=' + onOff(featureEnabled(null, 'fullRfLog'))
         + ' rfSampler=' + onOff(featureEnabled(null, 'rfSampler'))
-        + ' regionDiscovery=' + onOff(featureEnabled(null, 'regionDiscovery'))));
+        + ' regionDiscovery=' + onOff(featureEnabled(null, 'regionDiscovery'))
+        + ' verifyAdverts=' + onOff(featureEnabled(null, 'verifyAdverts'))));
 
   lines.push(row('firmware', fwVer == null ? 'unknown (device info not read)' : 'v' + fwVer));
 

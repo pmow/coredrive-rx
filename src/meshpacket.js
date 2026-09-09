@@ -11,6 +11,10 @@ export const PAYLOAD_TYPE_TRACE = 9;   // path bytes are per-hop SNR, NOT hop ha
 export const PAYLOAD_TYPE_CONTROL = 11; // 0x0B — control data (e.g. node-discover)
 export const CTRL_DISCOVER_RESP = 0x9;  // sub_type nibble (flags >> 4) of a DISCOVER_RESP
 export const ADV_TYPE_REPEATER = 2;     // appdata flags low nibble (AdvertDataHelpers.h)
+// The firmware signs and verifies over at most this many appdata bytes
+// (MAX_ADVERT_DATA_SIZE, meshcore-firmware src/MeshCore.h:12). An advert may carry more
+// on the air; the bytes past the cap are outside the signature.
+export const MAX_ADVERT_DATA_SIZE = 32;
 
 function isTransportRoute(rt) {
   return rt === ROUTE_TRANSPORT_FLOOD || rt === ROUTE_TRANSPORT_DIRECT;
@@ -82,6 +86,26 @@ export function parsePacket(bytes) {
     advertType = bytes[off + 100] & 0x0f;
   }
 
+  // advertSig is the material an Ed25519 check needs, assembled here because this is the
+  // only place that knows where the payload starts. The message is exactly what the
+  // firmware signs and verifies over: pubkey(32) || timestamp(4, LE) || app_data, with
+  // app_data truncated to MAX_ADVERT_DATA_SIZE (Mesh.cpp:271-280 signs the same bytes at
+  // :404-437). The timestamp goes in as the raw little-endian bytes rather than the
+  // parsed advertTs, so no re-encoding step can disagree with the wire. null when the
+  // frame is too short to hold a signature, or is not an advert at all.
+  let advertSig = null;
+  if (isAdvert && off + 100 <= bytes.length) {
+    const appdata = bytes.slice(off + 100, Math.min(bytes.length, off + 100 + MAX_ADVERT_DATA_SIZE));
+    const message = new Uint8Array(36 + appdata.length);
+    message.set(bytes.slice(off, off + 36), 0);
+    message.set(appdata, 36);
+    advertSig = {
+      pubkey: bytes.slice(off, off + 32),
+      signature: bytes.slice(off + 36, off + 100),
+      message,
+    };
+  }
+
   // node-discover reply (CONTROL/DISCOVER_RESP): payload is [flags][snr][tag×4][pubkey].
   // The pubkey (8-byte prefix or full 32) is the responder's identity — a direct, high-quality
   // heard_key, better than a path hash. Control payload bytes are unencrypted (firmware payloads.md).
@@ -100,7 +124,7 @@ export function parsePacket(bytes) {
   }
 
   return {
-    routeType, payloadType, isAdvert, hops, advertPubkey, advertTs, advertType,
+    routeType, payloadType, isAdvert, hops, advertPubkey, advertTs, advertType, advertSig,
     isDiscoverResp, discoverPubkey, discoverType,
   };
 }

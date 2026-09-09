@@ -1,6 +1,6 @@
 {
   "name": "coredrive-rx",
-  "version": "1.11.3",
+  "version": "1.12.0",
   "private": false,
   "license": "GPL-3.0-or-later",
   "type": "module",
@@ -19,6 +19,7 @@
     "deploy": "bash deploy.sh"
   },
   "dependencies": {
+    "@noble/ed25519": "^3.2.0",
     "mqtt": "^5.10.1"
   },
   "devDependencies": {

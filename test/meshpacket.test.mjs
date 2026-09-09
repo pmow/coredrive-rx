@@ -1,7 +1,7 @@
 // Run: node --test  (or: node test/meshpacket.test.mjs)
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { parsePacket, deriveHeardKey, hexToBytes } from '../src/meshpacket.js';
+import { parsePacket, deriveHeardKey, hexToBytes, bytesToHex } from '../src/meshpacket.js';
 
 // Real relayed advert fixture (payload_type=4, 5×2-byte hops). Same hex used in
 // CoreScope's ingestor test; last hop = 152c.
@@ -100,4 +100,34 @@ test('tx and 1-byte-last-hop are rejected', () => {
   // FLOOD txt, 1 hop of 1 byte: header 0x09, pathByte 0x01, hop 'aa'
   const oneByte = parsePacket(hexToBytes('0901aa'));
   assert.strictEqual(deriveHeardKey('rx', oneByte), null);
+});
+
+// advertSig exposes the exact bytes the firmware signs and verifies over:
+// pubkey(32) || timestamp(4, LE) || app_data, with app_data capped at
+// MAX_ADVERT_DATA_SIZE (meshcore-firmware src/Mesh.cpp:271-280 and :404-437,
+// src/MeshCore.h:12). Getting the cap wrong makes every long advert look forged.
+test('an advert exposes the exact bytes the firmware signed', () => {
+  const pubkey = 'ab'.repeat(32);
+  const raw = '11' + '00' + pubkey + '78563412' + '11'.repeat(64) + '02' + 'cd'.repeat(4);
+  const pkt = parsePacket(hexToBytes(raw));
+  assert.strictEqual(bytesToHex(pkt.advertSig.pubkey), pubkey);
+  assert.strictEqual(bytesToHex(pkt.advertSig.signature), '11'.repeat(64));
+  assert.strictEqual(bytesToHex(pkt.advertSig.message), pubkey + '78563412' + '02' + 'cd'.repeat(4));
+});
+
+test('the signed message caps appdata at 32 bytes, as the firmware does', () => {
+  const pubkey = 'ab'.repeat(32);
+  const raw = '11' + '00' + pubkey + '78563412' + '11'.repeat(64) + 'cd'.repeat(40);
+  const pkt = parsePacket(hexToBytes(raw));
+  assert.strictEqual(bytesToHex(pkt.advertSig.message), pubkey + '78563412' + 'cd'.repeat(32));
+});
+
+test('an advert too short to hold a full signature exposes no signed message', () => {
+  const raw = '11' + '00' + 'ab'.repeat(32) + '78563412' + '11'.repeat(20);
+  assert.strictEqual(parsePacket(hexToBytes(raw)).advertSig, null);
+});
+
+test('a packet that is not an advert exposes no signed message', () => {
+  const raw = '2E' + '00' + '90' + '14' + 'deadbeef' + '1122334455667788';
+  assert.strictEqual(parsePacket(hexToBytes(raw)).advertSig, null);
 });

@@ -169,3 +169,12 @@ test('a failed load leaves getConfig() null — callers must be able to detect "
   assert.strictEqual(getConfig(), null);
   setConfig(null);
 });
+
+// verifyAdverts is the one flag whose absence means OFF. It changes what reaches
+// CoreScope (a forged advert stops being recorded under its claimed identity), and a
+// deployment should turn that on deliberately rather than discover it.
+test('verifyAdverts stays off unless config.json turns it on', () => {
+  assert.strictEqual(featureEnabled(null, 'verifyAdverts'), false);
+  assert.strictEqual(featureEnabled({}, 'verifyAdverts'), false);
+  assert.strictEqual(featureEnabled({ verifyAdverts: true }, 'verifyAdverts'), true);
+});

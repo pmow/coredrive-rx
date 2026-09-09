@@ -8,7 +8,7 @@
 // failures made the case for reading silence as "on": a config cached before these
 // keys existed reported the features off while the served file said on, and that is
 // indistinguishable from the features being broken. An explicit `false` still wins.
-export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: true };
+export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: true, verifyAdverts: false };
 
 // NO_CONFIG_DEFAULTS applies when NO config loaded at all. The two logging features
 // stay on: data never collected is gone for good, while data collected and discarded
@@ -21,7 +21,12 @@ export const FEATURE_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscov
 // requester and type, so one client asking once a minute already claims most of that
 // budget. Collecting on an assumption spends our own bandwidth; transmitting on one
 // spends a stranger's airtime.
-export const NO_CONFIG_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: false };
+export const NO_CONFIG_DEFAULTS = { fullRfLog: true, rfSampler: true, regionDiscovery: false, verifyAdverts: false };
+
+// verifyAdverts is the one flag listed as false in BOTH maps, and deliberately so: it is
+// the only flag that makes the app record LESS than it heard. An advert whose Ed25519
+// signature does not check out loses its identity, so turning it on silently would look
+// like adverts going missing. A deployment opts into that; it should not inherit it.
 
 // featureEnabled resolves one flag from whatever is known, INCLUDING the case every
 // gate in app.js used to get wrong: `config === null`. Those gates read

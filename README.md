@@ -112,7 +112,8 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
   "resolveUrl": "https://corescope.yourdomain/api/nodes/resolve",
   "fullRfLog": true,
   "rfSampler": true,
-  "regionDiscovery": true
+  "regionDiscovery": true,
+  "verifyAdverts": false
 }
 ```
 > `mqttPassword` is a **publish-only, ACL-constrained** account — it is shipped to browsers, so treat
@@ -138,9 +139,15 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
 > permits that `/regions` subtopic for this client**, for the same silent-PUBACK reason as `rfSampler`
 > above. Confirm the topic is allowed (and that the CoreScope ingestor has `clientRegions.enabled:
 > true`) with your CoreScope sysop before turning this on — otherwise the ingestor decodes and
-> discards every upload, same as `fullRfLog` off.
+> discards every upload, same as `fullRfLog` off. `verifyAdverts` is optional and **defaults to
+> `false`, absent or not** (the one flag that does — see below); when on, a 0-hop advert's Ed25519
+> signature is checked against the bytes the firmware signed before its pubkey is recorded as the
+> node heard. An advert that fails loses its identity: the reception is still published, with its
+> SNR, RSSI and position, but unattributed, and the node is not asked for its regions either. This
+> costs nothing on the air and runs on roughly 3% of captured traffic, but it is the only flag that
+> makes the app record **less** than it heard, so turn it on deliberately.
 
-> **Why an absent flag means ON — and the one place it does not.** An absent flag used to mean
+> **Why an absent flag means ON — and the two places it does not.** An absent flag used to mean
 > off, which made two failures invisible: a `config.json` cached before these keys existed
 > reported the features off while the served file said on, and a config that failed to fetch
 > stopped data *collection* as well as uploading. Data never collected is gone for good; data
@@ -158,6 +165,11 @@ Put a `config.json` in the served directory (next to `index.html`). Start from t
 > repeaters being asked; no config means the app knows nothing about whose mesh it is on.
 > Collecting on an assumption spends your own bandwidth, transmitting on one spends a stranger's
 > airtime, so only the former is assumed.
+>
+> `verifyAdverts` is the second exception, and the only flag that is off in **both** cases. The rule
+> above assumes more data is the safe default; this flag inverts that, because a failed check
+> removes an identity the capture would otherwise have recorded. Inheriting that silently would look
+> like adverts going missing, so it is opt-in.
 
 Changing any value later is just a `config.json` edit + page refresh — no rebuild.
 
