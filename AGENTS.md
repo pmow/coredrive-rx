@@ -25,14 +25,18 @@ CoreScope's AGENTS.md — this repo has its own conventions below.
 ## Workflow
 - Semantic versioning in `package.json`. Tag each release `git tag vX.Y.Z` and `git push --tags`.
   patch = fix/tweak, minor = backward-compatible feature, major = breaking (e.g. payload contract).
-- Every release tag MUST have a "What's New" body on its GitHub Release (the CI auto-creates the
-  release with only a changelog link — replace it). Use:
-  `gh release edit vX.Y.Z --repo efiten/coredrive-rx --notes-file <notes.md>`. Cover: a one-line
-  summary, a "What's new" bullet list (user-facing changes), and "Upgrade notes" (SW cache bump,
-  any data/config migration). So anyone reading the tag sees what changed without diffing.
-- Notes are CUMULATIVE: each new tag's body includes this release's section PLUS every previous
-  release's "What's New", newest first (e.g. v1.0.1's body shows v1.0.1 then v1.0.0). So the latest
-  tag always tells the full story; a reader never has to hop between tags.
+- Every release tag MUST have a "What's New" body, written as `docs/releases/vX.Y.Z.md` in the SAME
+  commit as the version bump. One file, one release: a `# CoreDrive RX vX.Y.Z` heading, a one-line
+  summary, a "What's new" bullet list (user-facing changes), and "Upgrade notes" (SW cache bump, any
+  data/config migration). So anyone reading the tag sees what changed without diffing.
+- Notes are CUMULATIVE, and that is now mechanical rather than remembered:
+  `scripts/release-notes.mjs <tag>` concatenates every release file from that tag downwards, newest
+  first, and `.github/workflows/release.yml` publishes the result as the body. A tag whose file is
+  missing FAILS the release job instead of shipping a changelog link. This rule was a human
+  convention for nine tags in a row and was missed on every one of them, which left v1.5.0 as the
+  last release anyone could read while region discovery landed unannounced.
+- To change a published body, edit the file under `docs/releases/` and re-post it:
+  `node scripts/release-notes.mjs vX.Y.Z | gh release edit vX.Y.Z --repo efiten/coredrive-rx --notes-file -`.
 - Commit AND push every change, with a descriptive message. Keep GitHub mirrored.
 - PWA cache discipline: the service worker is network-first; `index.html`, `sw.js`, `manifest`, and
   `config.json` must be served `no-cache`; `/assets/` is immutable.
