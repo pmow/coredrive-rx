@@ -34,15 +34,39 @@ export class Publisher {
 
   _emit(ev, arg) { if (this._onStatus) this._onStatus(ev, arg, this.id); }
 
-  connect() {
-    this.client = mqtt.connect(this.opts.url, {
-      username: this.opts.username,
-      password: this.opts.password,
-      clientId: this.opts.clientId, // = companion pubkey; EMQX ACL can bind topics to ${clientid}
+  // connectOptions is the mqtt.js option set, split out so it can be asserted without
+  // opening a socket.
+  //
+  // timerVariant 'native' is load-bearing. mqtt.js defaults to 'auto', which in a browser
+  // runs the keepalive interval through worker-timers: the page hands
+  // performance.timeOrigin + performance.now() to a Worker, which compares it against its
+  // own clock (worker-timers-worker set-timer.js). That Worker is created lazily, on the
+  // first connect, so it takes its time origin from the wall clock at that moment — while
+  // the page's performance.now() does NOT advance while an Android device sleeps. A
+  // session left open for seven hours therefore handed the Worker a "now" hours in the
+  // past, every keepalive tick was already overdue, the Worker fired three back to back
+  // and mqtt.js raised 'Keepalive timeout' in the same second as the CONNACK. Every
+  // reconnect re-armed the manager against the same skew, and the Worker is a module
+  // singleton, so neither reconnecting nor building a fresh Publisher could clear it —
+  // only reloading the page did, which is exactly what the field report says.
+  //
+  // A native interval is measured in one clock domain and cannot drift that way.
+  // Background throttling of a native timer costs at most one keepalive timeout, and the
+  // ordinary reconnect recovers from that.
+  static connectOptions(opts) {
+    return {
+      username: opts.username,
+      password: opts.password,
+      clientId: opts.clientId, // = companion pubkey; EMQX ACL can bind topics to ${clientid}
       reconnectPeriod: 4000,
       keepalive: KEEPALIVE_SECS,
       clean: true,
-    });
+      timerVariant: 'native',
+    };
+  }
+
+  connect() {
+    this.client = mqtt.connect(this.opts.url, Publisher.connectOptions(this.opts));
     // 'connect' carries the CONNACK packet through, so the log can record its return
     // code instead of leaving an auth or takeover refusal indistinguishable from a
     // network failure.

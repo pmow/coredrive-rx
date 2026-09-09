@@ -125,3 +125,27 @@ test('keepalive is stated explicitly, not inherited from mqtt.js', () => {
   assert.strictEqual(typeof KEEPALIVE_SECS, 'number');
   assert.ok(KEEPALIVE_SECS > 0);
 });
+
+// timerVariant: mqtt.js defaults to 'auto', which on a browser schedules the keepalive
+// interval with worker-timers. That Worker is created on the FIRST connect and takes its
+// time origin from the wall clock at that moment, while the page's
+// performance.timeOrigin + performance.now() stops advancing while an Android device
+// sleeps. A session left open overnight therefore handed the Worker a "now" hours in the
+// past, every keepalive tick was already overdue, the Worker fired three of them back to
+// back, and mqtt.js raised 'Keepalive timeout' in the same second as the CONNACK. Each
+// reconnect re-armed the manager against the same skew and the Worker is a module
+// singleton, so only a page reload ended the loop.
+test('connect options pin the keepalive timer to native, not worker-timers', () => {
+  const o = Publisher.connectOptions({ url: 'x', username: 'u', password: 'p', clientId: 'c' });
+  assert.strictEqual(o.timerVariant, 'native');
+});
+
+test('connect options keep the credentials, client id, keepalive and reconnect period', () => {
+  const o = Publisher.connectOptions({ url: 'x', username: 'u', password: 'p', clientId: 'c' });
+  assert.strictEqual(o.username, 'u');
+  assert.strictEqual(o.password, 'p');
+  assert.strictEqual(o.clientId, 'c');
+  assert.strictEqual(o.keepalive, KEEPALIVE_SECS);
+  assert.strictEqual(o.reconnectPeriod, 4000);
+  assert.strictEqual(o.clean, true);
+});
