@@ -1,7 +1,7 @@
 services:
   coredrive-rx:
     build:
-      context: https://github.com/efiten/coredrive-rx.git#master
+      context: https://github.com/pmow/coredrive-rx.git#master
     ports:
       - "${RX_PORT:-8443}:80"
     volumes:
